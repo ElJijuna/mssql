@@ -47,6 +47,39 @@ const id = await client.insert('dbo.Users', { name: 'Ana', email: 'ana@example.c
 
 Values are sent as parameters and table/column names are bracket-quoted, so user input is never concatenated into the SQL.
 
+### Insert many rows
+
+`insertMany` sends the rows in chunks (one T-SQL batch per chunk, 500 rows by default) and tells you which row failed.
+
+**All or nothing** (default, `onError: 'rollback'`): runs in a transaction; if a row fails nothing is saved and an `InsertManyError` is thrown.
+
+```ts
+import { InsertManyError } from '@pilmee/mssql';
+
+try {
+  const { ids } = await client.insertMany('dbo.Users', [
+    { name: 'Ana', email: 'ana@example.com' },
+    { name: 'Luis', email: 'luis@example.com' },
+  ]);
+  // ids → [101, 102]
+} catch (error) {
+  if (error instanceof InsertManyError) {
+    console.error(`Row ${error.index} failed (${error.number}): ${error.sqlMessage}`, error.row);
+  }
+}
+```
+
+**Best effort** (`onError: 'continue'`): every row is attempted; failures are returned instead of thrown.
+
+```ts
+const { inserted, ids, failures } = await client.insertMany('dbo.Users', rows, { onError: 'continue' });
+// inserted → 2
+// ids      → [101, null, 102]   (null = failed)
+// failures → [{ index: 1, row: {...}, number: 2627, message: 'Violation of UNIQUE KEY constraint...' }]
+```
+
+Rows can have different columns and can use typed parameters (`t.nvarchar(...)`). Chunks are also split automatically to stay under SQL Server's 2100-parameter limit; tune the size with `chunkSize`.
+
 ### Typed parameters
 
 Plain values are typed by `mssql` from the JavaScript value. Use the `t` builders — named after the T-SQL types — to set the exact type and its dimensions:

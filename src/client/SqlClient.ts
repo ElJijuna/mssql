@@ -1,7 +1,13 @@
 import sql from 'mssql';
+import { InsertManyError } from '../errors/InsertManyError';
 import { SqlClientError } from '../errors/SqlClientError';
-import { bindInput } from '../types/SqlParam';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
+import {
+  buildInsertBatch,
+  buildInsertStatement,
+  chunkRows,
+  type InsertManyOnError,
+} from './insertSql';
 
 /**
  * Configuration accepted by {@link SqlClient}. Same shape as `mssql`'s `config`.
@@ -13,6 +19,55 @@ export type SqlClientConfig = sql.config;
  * Use the {@link t} builders to set an explicit type, otherwise mssql infers it from the value.
  */
 export type SqlRow = Record<string, unknown>;
+
+/**
+ * Options for {@link SqlClient.insertMany}.
+ */
+export interface InsertManyOptions {
+  /**
+   * What to do when a row fails. Defaults to `'rollback'` (all or nothing).
+   */
+  onError?: InsertManyOnError;
+  /**
+   * Maximum rows sent per round trip. Defaults to `500`. Chunks are also split to stay under
+   * SQL Server's 2100-parameter limit.
+   */
+  chunkSize?: number;
+}
+
+/**
+ * A row that failed in {@link SqlClient.insertMany} with `onError: 'continue'`.
+ */
+export interface InsertManyFailure {
+  /** Position of the row in the input array. */
+  index: number;
+  /** The row that failed. */
+  row: SqlRow;
+  /** SQL Server error number (e.g. 2627 for a unique key violation). */
+  number: number;
+  /** SQL Server error message. */
+  message: string;
+}
+
+/**
+ * Result of {@link SqlClient.insertMany}.
+ */
+export interface InsertManyResult {
+  /** Number of rows inserted. */
+  inserted: number;
+  /**
+   * Generated identities aligned with the input rows. `null` for failed rows or tables without an
+   * identity column.
+   */
+  ids: Array<number | null>;
+  /** Rows that failed. Always empty in `'rollback'` mode (it throws instead). */
+  failures: InsertManyFailure[];
+}
+
+interface BatchResult {
+  failures: Array<{ i: number; number: number; message: string }>;
+  ids: Array<{ i: number; id: number | null }>;
+}
 
 /**
  * Thin wrapper around an `mssql` connection pool that will host the helper methods.
@@ -64,22 +119,130 @@ export class SqlClient {
   public async insert(table: string, row: SqlRow): Promise<number | null> {
     const pool = await this.connect();
     const request = pool.request();
-    const columns = Object.keys(row);
-    const target = quoteIdentifier(table);
-
-    columns.forEach((column, index) => {
-      bindInput(request, `p${index}`, row[column]);
-    });
-
-    const insert =
-      columns.length === 0
-        ? `INSERT INTO ${target} DEFAULT VALUES;`
-        : `INSERT INTO ${target} (${columns.map(quoteIdentifier).join(', ')}) VALUES (${columns.map((_, index) => `@p${index}`).join(', ')});`;
+    const insert = buildInsertStatement(quoteIdentifier(table), row, request);
     const result = await request.query<{ id: number | null }>(
       `${insert} SELECT SCOPE_IDENTITY() AS id;`,
     );
 
     return result.recordset[0]?.id ?? null;
+  }
+
+  /**
+   * Inserts many rows in as few round trips as possible and tells you exactly which row failed.
+   *
+   * Rows are sent in chunks; each chunk is a single T-SQL batch. Rows may have different columns.
+   *
+   * - `onError: 'rollback'` (default): runs in a transaction. If any row fails, nothing is
+   *   persisted and an {@link InsertManyError} is thrown with the failing row's `index`.
+   * - `onError: 'continue'`: every row is attempted; failures are returned in `result.failures`.
+   *
+   * @param table - Table name, optionally schema-qualified (`dbo.Users`).
+   * @param rows - Rows to insert.
+   * @param options - See {@link InsertManyOptions}.
+   *
+   * @example
+   * try {
+   *   const { ids } = await client.insertMany('dbo.Users', [{ name: 'Ana' }, { name: 'Luis' }]);
+   * } catch (error) {
+   *   if (error instanceof InsertManyError) {
+   *     console.error(`Row ${error.index} failed`, error.row, error.sqlMessage);
+   *   }
+   * }
+   */
+  public async insertMany(
+    table: string,
+    rows: SqlRow[],
+    options: InsertManyOptions = {},
+  ): Promise<InsertManyResult> {
+    const { onError = 'rollback', chunkSize = 500 } = options;
+    const result: InsertManyResult = { inserted: 0, ids: rows.map(() => null), failures: [] };
+
+    if (rows.length === 0) {
+      return result;
+    }
+
+    const pool = await this.connect();
+    const chunks = chunkRows(rows, chunkSize);
+
+    if (onError === 'continue') {
+      for (const indexes of chunks) {
+        this.collect(
+          result,
+          rows,
+          await this.runBatch(pool.request(), table, rows, indexes, onError),
+        );
+      }
+
+      return result;
+    }
+
+    const transaction = pool.transaction();
+
+    await transaction.begin();
+
+    try {
+      for (const indexes of chunks) {
+        const batch = await this.runBatch(transaction.request(), table, rows, indexes, onError);
+        const [failure] = batch.failures;
+
+        if (failure) {
+          throw new InsertManyError(
+            failure.i,
+            rows[failure.i] ?? {},
+            failure.number,
+            failure.message,
+          );
+        }
+
+        this.collect(result, rows, batch);
+      }
+
+      await transaction.commit();
+    } catch (error) {
+      await this.rollbackQuietly(transaction);
+
+      throw error instanceof SqlClientError
+        ? error
+        : new SqlClientError('insertMany failed', { cause: error });
+    }
+
+    return result;
+  }
+
+  private async runBatch(
+    request: sql.Request,
+    table: string,
+    rows: SqlRow[],
+    indexes: number[],
+    onError: InsertManyOnError,
+  ): Promise<BatchResult> {
+    const batch = buildInsertBatch(table, rows, indexes, request, onError);
+    const { recordsets } = await request.query(batch);
+    const [failures = [], ids = []] = recordsets as unknown as [
+      BatchResult['failures'],
+      BatchResult['ids'],
+    ];
+
+    return { failures, ids };
+  }
+
+  private async rollbackQuietly(transaction: sql.Transaction): Promise<void> {
+    try {
+      await transaction.rollback();
+    } catch {
+      // Already rolled back by SQL Server (e.g. XACT_ABORT); the original error is what matters.
+    }
+  }
+
+  private collect(result: InsertManyResult, rows: SqlRow[], batch: BatchResult): void {
+    for (const { i, id } of batch.ids) {
+      result.ids[i] = id;
+      result.inserted += 1;
+    }
+
+    for (const { i, number, message } of batch.failures) {
+      result.failures.push({ index: i, row: rows[i] ?? {}, number, message });
+    }
   }
 
   /**
