@@ -1,4 +1,11 @@
 import sql from 'mssql';
+import {
+  createQueryRunner,
+  type QueryOptions,
+  type QueryRunner,
+  resolveLogger,
+  type SqlDebugOption,
+} from '../debug/debug';
 import { SqlClientError } from '../errors/SqlClientError';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
 import { type BatchOptions, executeBatch, type RowAction, type RowFailure, track } from './batch';
@@ -15,6 +22,20 @@ export type SqlClientConfig = sql.config;
  * Use the {@link t} builders to set an explicit type, otherwise mssql infers it from the value.
  */
 export type SqlRow = Record<string, unknown>;
+
+/**
+ * Client-level options.
+ */
+export interface SqlClientOptions {
+  /**
+   * Print the SQL of every helper call before it is sent. `true` uses `console.debug`; pass a
+   * function to route entries to your own logger. Each call can override it with its own `debug`.
+   *
+   * @example
+   * new SqlClient(config, { debug: process.env.NODE_ENV === 'development' });
+   */
+  debug?: SqlDebugOption;
+}
 
 /**
  * Result of {@link SqlClient.insertMany}.
@@ -54,10 +75,12 @@ export interface MergeResult {
  */
 export class SqlClient {
   private readonly config: SqlClientConfig;
+  private readonly options: SqlClientOptions;
   private poolPromise: Promise<sql.ConnectionPool> | undefined;
 
-  public constructor(config: SqlClientConfig) {
+  public constructor(config: SqlClientConfig, options: SqlClientOptions = {}) {
     this.config = config;
+    this.options = options;
   }
 
   /**
@@ -67,6 +90,10 @@ export class SqlClient {
     this.poolPromise ??= this.openPool();
 
     return this.poolPromise;
+  }
+
+  private runner(operation: string, options: QueryOptions): QueryRunner {
+    return createQueryRunner(operation, resolveLogger(this.options.debug, options.debug));
   }
 
   private async openPool(): Promise<sql.ConnectionPool> {
@@ -88,6 +115,7 @@ export class SqlClient {
    *
    * @param table - Table name, optionally schema-qualified (`dbo.Users`).
    * @param row - Column/value pairs to insert. An empty object inserts `DEFAULT VALUES`.
+   * @param options - See {@link QueryOptions}.
    * @returns The generated identity, or `null` when the table has no identity column.
    *
    * @example
@@ -96,23 +124,21 @@ export class SqlClient {
    *   email: 'ana@example.com',
    * });
    */
-  public async insert(table: string, row: SqlRow): Promise<number | null> {
-    const pool = await this.connect();
-
-    return this.insertOne(pool.request(), table, row);
-  }
-
-  private async insertOne(
-    request: sql.Request,
+  public async insert(
     table: string,
     row: SqlRow,
+    options: QueryOptions = {},
   ): Promise<number | null> {
+    const pool = await this.connect();
+    const request = pool.request();
     const insert = buildInsertStatement(quoteIdentifier(table), row, request);
-    const result = await request.query<{ id: number | null }>(
+    const result = await this.runner('insert', options)(
+      request,
       `${insert} SELECT SCOPE_IDENTITY() AS id;`,
     );
+    const id = result.recordset[0]?.id;
 
-    return result.recordset[0]?.id ?? null;
+    return typeof id === 'number' ? id : null;
   }
 
   /**
@@ -151,13 +177,14 @@ export class SqlClient {
     }
 
     const target = quoteIdentifier(table);
-    const { outcomes, failures } = await executeBatch(
-      await this.connect(),
+    const { outcomes, failures } = await executeBatch({
+      pool: await this.connect(),
       rows,
       options,
-      (row, request, offset) =>
+      query: this.runner('insertMany', options),
+      build: (row, request, offset) =>
         `${buildInsertStatement(target, row, request, offset)} ${track('inserted', 'SCOPE_IDENTITY()')}`,
-    );
+    });
 
     for (const { i, id } of outcomes) {
       result.ids[i] = id;
@@ -213,13 +240,14 @@ export class SqlClient {
       return result;
     }
 
-    const { outcomes, failures } = await executeBatch(
-      await this.connect(),
+    const { outcomes, failures } = await executeBatch({
+      pool: await this.connect(),
       rows,
       options,
-      buildMergeStatement(table, keys, options.update),
-      missingKey(keys),
-    );
+      query: this.runner('merge', options),
+      build: buildMergeStatement(table, keys, options.update),
+      validate: missingKey(keys),
+    });
 
     for (const { i, action, id } of outcomes) {
       result.actions[i] = action;
@@ -241,12 +269,18 @@ export class SqlClient {
    * @param table - Table name, optionally schema-qualified (`dbo.Users`).
    * @param values - Columns to set.
    * @param where - Columns identifying the rows to update.
+   * @param options - See {@link QueryOptions}.
    * @returns Number of rows updated.
    *
    * @example
    * await client.update('dbo.Users', { name: 'Ana María' }, { id: 42 }); // → 1
    */
-  public async update(table: string, values: SqlRow, where: SqlRow): Promise<number> {
+  public async update(
+    table: string,
+    values: SqlRow,
+    where: SqlRow,
+    options: QueryOptions = {},
+  ): Promise<number> {
     const whereKeys = requireWhere('update', where);
 
     if (Object.keys(values).length === 0) {
@@ -258,7 +292,8 @@ export class SqlClient {
     const set = bindRow(values, request, 0);
     const match = bindRow(where, request, set.size);
     const assignments = [...set].map(([column, param]) => `${quoteIdentifier(column)} = ${param}`);
-    const result = await request.query(
+    const result = await this.runner('update', options)(
+      request,
       `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')} WHERE ${keyPredicate(whereKeys, where, match)};`,
     );
 
@@ -273,17 +308,19 @@ export class SqlClient {
    *
    * @param table - Table name, optionally schema-qualified (`dbo.Users`).
    * @param where - Columns identifying the rows to delete.
+   * @param options - See {@link QueryOptions}.
    * @returns Number of rows deleted.
    *
    * @example
    * await client.delete('dbo.Sessions', { userId: 42 }); // → 3
    */
-  public async delete(table: string, where: SqlRow): Promise<number> {
+  public async delete(table: string, where: SqlRow, options: QueryOptions = {}): Promise<number> {
     const whereKeys = requireWhere('delete', where);
     const pool = await this.connect();
     const request = pool.request();
     const match = bindRow(where, request, 0);
-    const result = await request.query(
+    const result = await this.runner('delete', options)(
+      request,
       `DELETE FROM ${quoteIdentifier(table)} WHERE ${keyPredicate(whereKeys, where, match)};`,
     );
 

@@ -9,6 +9,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
 - [Typed parameters](#typed-parameters)
 - [Error handling](#error-handling)
+- [Debug mode](#debug-mode)
 
 ## Install
 
@@ -195,6 +196,57 @@ await client.insert('dbo.Products', {
 | `BatchRowError` | `insertMany` / `merge` in `'rollback'` mode when a row fails. Has `index`, `row`, `number`, `sqlMessage`. Nothing was saved. |
 
 In `'continue'` mode batch helpers don't throw; each entry in `failures` has `index`, `row`, `number` and `message`. `number` is the SQL Server error number (e.g. `2627` unique key, `547` foreign key, `515` NOT NULL, `2628` truncation), or `null` when the error came from the driver or from validation.
+
+## Debug mode
+
+Print the SQL each helper sends — with its parameters — as a script you can paste into SSMS / Azure Data Studio.
+
+**Every call**, on the client:
+
+```ts
+const client = new SqlClient(config, { debug: process.env.NODE_ENV === 'development' });
+```
+
+**A single call**, with the `debug` option (available on every helper):
+
+```ts
+await client.insert('dbo.Users', { name: t.nvarchar('Ana', 100), age: 30 }, { debug: true });
+await client.update('dbo.Users', { name: 'Ana' }, { id: 42 }, { debug: true });
+await client.insertMany('dbo.Users', rows, { debug: true });
+await client.merge('dbo.Users', rows, { on: 'email', debug: true });
+```
+
+Output (`console.debug`):
+
+```sql
+-- [@pilmee/mssql] insert
+DECLARE @p0 nvarchar(100) = N'Ana';
+DECLARE @p1 int = 30;
+INSERT INTO [dbo].[Users] ([name], [age]) VALUES (@p0, @p1); SELECT SCOPE_IDENTITY() AS id;
+```
+
+The call-level option wins, so `{ debug: false }` silences one call while debug is on for the client. Batch helpers log one entry per chunk sent (and per row when a rejected chunk is retried row by row).
+
+**Custom logger**: pass a function instead of `true` to receive structured entries:
+
+```ts
+import type { SqlDebugEntry } from '@pilmee/mssql';
+
+const client = new SqlClient(config, {
+  debug: (entry: SqlDebugEntry) => logger.debug({ op: entry.operation, sql: entry.sql, params: entry.params }),
+});
+```
+
+| Field | Content |
+| --- | --- |
+| `operation` | `insert`, `insertMany`, `merge`, `update` or `delete` |
+| `sql` | SQL text exactly as sent, with `@p0`, `@p1`… placeholders |
+| `params` | `[{ name, type, value }]`, e.g. `{ name: 'p0', type: 'nvarchar(100)', value: 'Ana' }` |
+| `script` | `DECLARE` per parameter + the SQL, ready to run |
+
+> Debug output includes parameter **values**. Keep it off in production and away from logs that may contain passwords or personal data.
+
+Queries you run directly on the raw pool (`client.connect()` → `pool.request().query(...)`) are not logged; use `mssql`'s own `DEBUG=mssql:*` for those.
 
 ## Scripts
 

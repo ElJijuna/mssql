@@ -1,4 +1,5 @@
 import type sql from 'mssql';
+import type { QueryOptions, QueryRunner } from '../debug/debug';
 import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlRow } from './SqlClient';
@@ -20,7 +21,7 @@ export type BatchOnError = 'rollback' | 'continue';
 /**
  * Options shared by batch operations ({@link SqlClient.insertMany}, {@link SqlClient.merge}).
  */
-export interface BatchOptions {
+export interface BatchOptions extends QueryOptions {
   /**
    * What to do when a row fails. Defaults to `'rollback'` (all or nothing).
    */
@@ -191,13 +192,14 @@ const describeError = (error: unknown): { number: number | null; message: string
   };
 };
 const runChunk = async (
+  query: QueryRunner,
   request: sql.Request,
   rows: SqlRow[],
   indexes: number[],
   onError: BatchOnError,
   build: RowStatementBuilder,
 ): Promise<BatchOutcome> => {
-  const { recordsets } = await request.query(buildBatch(rows, indexes, request, onError, build));
+  const { recordsets } = await query(request, buildBatch(rows, indexes, request, onError, build));
   const [failures = [], outcomes = []] = recordsets as unknown as [
     Array<{ i: number; number: number | null; message: string }>,
     RowOutcome[],
@@ -218,19 +220,20 @@ const runChunk = async (
  * refuses before sending), retries its rows one by one so each failure is attributed to its row.
  */
 const runChunkOrRowByRow = async (
+  query: QueryRunner,
   pool: sql.ConnectionPool,
   rows: SqlRow[],
   indexes: number[],
   build: RowStatementBuilder,
 ): Promise<BatchOutcome> => {
   try {
-    return await runChunk(pool.request(), rows, indexes, 'continue', build);
+    return await runChunk(query, pool.request(), rows, indexes, 'continue', build);
   } catch {
     const outcome: BatchOutcome = { outcomes: [], failures: [] };
 
     for (const i of indexes) {
       try {
-        const single = await runChunk(pool.request(), rows, [i], 'continue', build);
+        const single = await runChunk(query, pool.request(), rows, [i], 'continue', build);
 
         outcome.outcomes.push(...single.outcomes);
         outcome.failures.push(...single.failures);
@@ -251,18 +254,31 @@ const rollbackQuietly = async (transaction: sql.Transaction): Promise<void> => {
 };
 
 /**
+ * @internal
+ */
+export interface ExecuteBatchParams {
+  pool: sql.ConnectionPool;
+  rows: SqlRow[];
+  options: BatchOptions;
+  build: RowStatementBuilder;
+  query: QueryRunner;
+  /** Returns an error message for rows that must not be sent. */
+  validate?: (row: SqlRow) => string | null;
+}
+
+/**
  * Runs `build` for every row in chunks, honoring {@link BatchOptions}.
- * `validate` returns an error message for rows that must not be sent.
  *
  * @internal
  */
-export const executeBatch = async (
-  pool: sql.ConnectionPool,
-  rows: SqlRow[],
-  options: BatchOptions,
-  build: RowStatementBuilder,
-  validate: (row: SqlRow) => string | null = () => null,
-): Promise<BatchOutcome> => {
+export const executeBatch = async ({
+  pool,
+  rows,
+  options,
+  build,
+  query,
+  validate = () => null,
+}: ExecuteBatchParams): Promise<BatchOutcome> => {
   const { onError = 'rollback', chunkSize = 500 } = options;
   const result: BatchOutcome = { outcomes: [], failures: [] };
   const valid: number[] = [];
@@ -281,7 +297,7 @@ export const executeBatch = async (
 
   if (onError === 'continue') {
     for (const indexes of chunks) {
-      const chunk = await runChunkOrRowByRow(pool, rows, indexes, build);
+      const chunk = await runChunkOrRowByRow(query, pool, rows, indexes, build);
 
       result.outcomes.push(...chunk.outcomes);
       result.failures.push(...chunk.failures);
@@ -304,7 +320,7 @@ export const executeBatch = async (
 
   try {
     for (const indexes of chunks) {
-      const chunk = await runChunk(transaction.request(), rows, indexes, 'rollback', build);
+      const chunk = await runChunk(query, transaction.request(), rows, indexes, 'rollback', build);
       const [failure] = chunk.failures;
 
       if (failure) {

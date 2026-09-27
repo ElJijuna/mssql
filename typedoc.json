@@ -8,5 +8,19 @@
     "navigationLinks": {
         "GitHub": "https://github.com/ElJijuna/mssql",
         "npm": "https://www.npmjs.com/package/@pilmee/mssql"
-    }
+    },
+    "highlightLanguages": [
+        "bash",
+        "console",
+        "css",
+        "html",
+        "javascript",
+        "json",
+        "jsonc",
+        "json5",
+        "yaml",
+        "tsx",
+        "typescript",
+        "sql"
+    ]
 }

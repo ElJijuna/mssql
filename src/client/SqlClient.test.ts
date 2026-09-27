@@ -33,11 +33,15 @@ const batchResult = (failures: unknown[], outcomes: unknown[]) => ({
 
 describe('SqlClient', () => {
   let pool: { connect: jest.Mock; close: jest.Mock; request: jest.Mock; transaction: jest.Mock };
-  let request: { input: jest.Mock; query: jest.Mock };
+  let request: { input: jest.Mock; query: jest.Mock; parameters: Record<string, unknown> };
   let transaction: { begin: jest.Mock; commit: jest.Mock; rollback: jest.Mock; request: jest.Mock };
 
   beforeEach(() => {
-    request = { input: jest.fn(), query: jest.fn().mockResolvedValue({ recordset: [{ id: 42 }] }) };
+    request = {
+      input: jest.fn(),
+      query: jest.fn().mockResolvedValue({ recordset: [{ id: 42 }] }),
+      parameters: {},
+    };
     transaction = {
       begin: jest.fn().mockResolvedValue(undefined),
       commit: jest.fn().mockResolvedValue(undefined),
@@ -379,6 +383,63 @@ describe('SqlClient', () => {
     it('refuses an empty where', async () => {
       await expect(new SqlClient(config).delete('Users', {})).rejects.toThrow(SqlClientError);
       expect(request.query).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('debug', () => {
+    it('logs every call when enabled on the client', async () => {
+      const logger = jest.fn();
+      const client = new SqlClient(config, { debug: logger });
+
+      request.query.mockResolvedValue({ recordset: [{ id: 1 }], rowsAffected: [1] });
+      await client.insert('Users', { name: 'Ana' });
+      await client.delete('Users', { id: 1 });
+
+      expect(logger).toHaveBeenCalledTimes(2);
+      expect(logger).toHaveBeenNthCalledWith(1, expect.objectContaining({ operation: 'insert' }));
+      expect(logger).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          operation: 'delete',
+          sql: 'DELETE FROM [Users] WHERE [id] = @p0;',
+        }),
+      );
+    });
+
+    it('logs a single call when enabled on that call', async () => {
+      const logger = jest.fn();
+      const client = new SqlClient(config);
+
+      request.query.mockResolvedValue({ rowsAffected: [1] });
+      await client.update('Users', { name: 'x' }, { id: 1 });
+      await client.update('Users', { name: 'y' }, { id: 1 }, { debug: logger });
+
+      expect(logger).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets a call opt out when enabled on the client', async () => {
+      const logger = jest.fn();
+
+      request.query.mockResolvedValue({ rowsAffected: [1] });
+      await new SqlClient(config, { debug: logger }).delete('Users', { id: 1 }, { debug: false });
+
+      expect(logger).not.toHaveBeenCalled();
+    });
+
+    it('logs each batch sent by insertMany and merge', async () => {
+      const logger = jest.fn();
+      const client = new SqlClient(config, { debug: logger });
+      const rows = [{ email: 'a' }, { email: 'b' }, { email: 'c' }];
+
+      request.query.mockResolvedValue(batchResult([], []));
+      await client.insertMany('Users', rows, { chunkSize: 2 });
+      await client.merge('Users', rows, { on: 'email' });
+
+      expect(logger.mock.calls.map(([entry]: [{ operation: string }]) => entry.operation)).toEqual([
+        'insertMany',
+        'insertMany',
+        'merge',
+      ]);
     });
   });
 });
