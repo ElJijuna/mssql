@@ -9,13 +9,13 @@ export class InsertManyError extends SqlClientError {
   /**
    * @param index - Position of the failing row in the input array.
    * @param row - The failing row.
-   * @param number - SQL Server error number (e.g. 2627 for a unique key violation).
+   * @param number - SQL Server error number (e.g. 2627 for a unique key violation), or `null`.
    * @param sqlMessage - SQL Server error message.
    */
   public constructor(
     public readonly index: number,
     public readonly row: SqlRow,
-    public readonly number: number,
+    public readonly number: number | null,
     public readonly sqlMessage: string,
   ) {
     super(`Row ${index} failed: ${sqlMessage}`);

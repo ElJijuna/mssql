@@ -43,9 +43,12 @@ export interface InsertManyFailure {
   index: number;
   /** The row that failed. */
   row: SqlRow;
-  /** SQL Server error number (e.g. 2627 for a unique key violation). */
-  number: number;
-  /** SQL Server error message. */
+  /**
+   * SQL Server error number (e.g. 2627 for a unique key violation), or `null` when the error did
+   * not come from SQL Server (e.g. a value rejected by the driver before sending it).
+   */
+  number: number | null;
+  /** Error message. */
   message: string;
 }
 
@@ -65,7 +68,7 @@ export interface InsertManyResult {
 }
 
 interface BatchResult {
-  failures: Array<{ i: number; number: number; message: string }>;
+  failures: Array<{ i: number; number: number | null; message: string }>;
   ids: Array<{ i: number; id: number | null }>;
 }
 
@@ -118,7 +121,15 @@ export class SqlClient {
    */
   public async insert(table: string, row: SqlRow): Promise<number | null> {
     const pool = await this.connect();
-    const request = pool.request();
+
+    return this.insertOne(pool.request(), table, row);
+  }
+
+  private async insertOne(
+    request: sql.Request,
+    table: string,
+    row: SqlRow,
+  ): Promise<number | null> {
     const insert = buildInsertStatement(quoteIdentifier(table), row, request);
     const result = await request.query<{ id: number | null }>(
       `${insert} SELECT SCOPE_IDENTITY() AS id;`,
@@ -134,7 +145,9 @@ export class SqlClient {
    *
    * - `onError: 'rollback'` (default): runs in a transaction. If any row fails, nothing is
    *   persisted and an {@link InsertManyError} is thrown with the failing row's `index`.
-   * - `onError: 'continue'`: every row is attempted; failures are returned in `result.failures`.
+   * - `onError: 'continue'`: every row is attempted and this method never throws once connected;
+   *   failures are returned in `result.failures`. If a whole chunk is rejected (e.g. an unknown
+   *   column, or a value the driver refuses), its rows are retried one by one to find the culprits.
    *
    * @param table - Table name, optionally schema-qualified (`dbo.Users`).
    * @param rows - Rows to insert.
@@ -166,11 +179,7 @@ export class SqlClient {
 
     if (onError === 'continue') {
       for (const indexes of chunks) {
-        this.collect(
-          result,
-          rows,
-          await this.runBatch(pool.request(), table, rows, indexes, onError),
-        );
+        this.collect(result, rows, await this.runBatchOrRowByRow(pool, table, rows, indexes));
       }
 
       return result;
@@ -226,6 +235,34 @@ export class SqlClient {
     return { failures, ids };
   }
 
+  /**
+   * Runs a chunk in `'continue'` mode. When the whole batch is rejected (a compile error, or a
+   * value the driver refuses before sending), retries its rows one by one so each failure is
+   * attributed to its row and the remaining rows still get inserted.
+   */
+  private async runBatchOrRowByRow(
+    pool: sql.ConnectionPool,
+    table: string,
+    rows: SqlRow[],
+    indexes: number[],
+  ): Promise<BatchResult> {
+    try {
+      return await this.runBatch(pool.request(), table, rows, indexes, 'continue');
+    } catch {
+      const batch: BatchResult = { failures: [], ids: [] };
+
+      for (const i of indexes) {
+        try {
+          batch.ids.push({ i, id: await this.insertOne(pool.request(), table, rows[i] ?? {}) });
+        } catch (error) {
+          batch.failures.push({ i, ...describeError(error) });
+        }
+      }
+
+      return batch;
+    }
+  }
+
   private async rollbackQuietly(transaction: sql.Transaction): Promise<void> {
     try {
       await transaction.rollback();
@@ -259,3 +296,12 @@ export class SqlClient {
     await pool.close();
   }
 }
+
+const describeError = (error: unknown): { number: number | null; message: string } => {
+  const number = (error as { number?: unknown } | null)?.number;
+
+  return {
+    number: typeof number === 'number' ? number : null,
+    message: error instanceof Error ? error.message : String(error),
+  };
+};

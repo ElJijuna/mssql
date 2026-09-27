@@ -69,7 +69,7 @@ try {
 }
 ```
 
-**Best effort** (`onError: 'continue'`): every row is attempted; failures are returned instead of thrown.
+**Best effort** (`onError: 'continue'`): every row is attempted and failures are reported, never thrown. If a whole chunk is rejected (an unknown column, or a value the driver refuses before sending), its rows are retried one by one so each failure is still attributed to its row.
 
 ```ts
 const { inserted, ids, failures } = await client.insertMany('dbo.Users', rows, { onError: 'continue' });
@@ -77,6 +77,8 @@ const { inserted, ids, failures } = await client.insertMany('dbo.Users', rows, {
 // ids      → [101, null, 102]   (null = failed)
 // failures → [{ index: 1, row: {...}, number: 2627, message: 'Violation of UNIQUE KEY constraint...' }]
 ```
+
+`number` is the SQL Server error number, or `null` when the error came from the driver instead of the server.
 
 Rows can have different columns and can use typed parameters (`t.nvarchar(...)`). Chunks are also split automatically to stay under SQL Server's 2100-parameter limit; tune the size with `chunkSize`.
 

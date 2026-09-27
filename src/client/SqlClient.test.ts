@@ -231,5 +231,49 @@ describe('SqlClient', () => {
       });
       expect(pool.transaction).not.toHaveBeenCalled();
     });
+
+    it('retries row by row when a whole chunk is rejected in continue mode', async () => {
+      const driverError = new Error('Validation failed for parameter p0. Invalid number.');
+      const sqlError = Object.assign(new Error('Violation of UNIQUE KEY'), { number: 2627 });
+
+      request.query
+        .mockRejectedValueOnce(driverError) // chunk [0, 1]
+        .mockResolvedValueOnce({ recordset: [{ id: 1 }] }) // row 0 alone
+        .mockRejectedValueOnce(driverError) // row 1 alone
+        .mockRejectedValueOnce(sqlError) // chunk [2]
+        .mockRejectedValueOnce(sqlError); // row 2 alone
+
+      await expect(
+        new SqlClient(config).insertMany('Users', rows, { onError: 'continue', chunkSize: 2 }),
+      ).resolves.toEqual({
+        inserted: 1,
+        ids: [1, null, null],
+        failures: [
+          { index: 1, row: { name: 'Luis' }, number: null, message: driverError.message },
+          { index: 2, row: { name: 'Eva' }, number: 2627, message: 'Violation of UNIQUE KEY' },
+        ],
+      });
+    });
+
+    it('keeps processing later chunks after a rejected chunk in continue mode', async () => {
+      const invalidColumn = new Error('Invalid column name');
+
+      request.query
+        .mockRejectedValueOnce(invalidColumn) // chunk [0, 1]
+        .mockRejectedValueOnce(invalidColumn) // row 0 alone
+        .mockResolvedValueOnce({ recordset: [{ id: 2 }] }) // row 1 alone
+        .mockResolvedValueOnce(batchResult([], [{ i: 2, id: 3 }])); // chunk [2]
+
+      await expect(
+        new SqlClient(config).insertMany('Users', rows, { onError: 'continue', chunkSize: 2 }),
+      ).resolves.toEqual({
+        inserted: 2,
+        ids: [null, 2, 3],
+        failures: [
+          { index: 0, row: { name: 'Ana' }, number: null, message: 'Invalid column name' },
+        ],
+      });
+      expect(request.query).toHaveBeenCalledTimes(4);
+    });
   });
 });
