@@ -1,13 +1,9 @@
 import sql from 'mssql';
-import { InsertManyError } from '../errors/InsertManyError';
 import { SqlClientError } from '../errors/SqlClientError';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
-import {
-  buildInsertBatch,
-  buildInsertStatement,
-  chunkRows,
-  type InsertManyOnError,
-} from './insertSql';
+import { type BatchOptions, executeBatch, type RowAction, type RowFailure, track } from './batch';
+import { buildMergeStatement, type MergeOptions, missingKey, normalizeKeys } from './merge';
+import { bindRow, buildInsertStatement, keyPredicate } from './statements';
 
 /**
  * Configuration accepted by {@link SqlClient}. Same shape as `mssql`'s `config`.
@@ -21,38 +17,6 @@ export type SqlClientConfig = sql.config;
 export type SqlRow = Record<string, unknown>;
 
 /**
- * Options for {@link SqlClient.insertMany}.
- */
-export interface InsertManyOptions {
-  /**
-   * What to do when a row fails. Defaults to `'rollback'` (all or nothing).
-   */
-  onError?: InsertManyOnError;
-  /**
-   * Maximum rows sent per round trip. Defaults to `500`. Chunks are also split to stay under
-   * SQL Server's 2100-parameter limit.
-   */
-  chunkSize?: number;
-}
-
-/**
- * A row that failed in {@link SqlClient.insertMany} with `onError: 'continue'`.
- */
-export interface InsertManyFailure {
-  /** Position of the row in the input array. */
-  index: number;
-  /** The row that failed. */
-  row: SqlRow;
-  /**
-   * SQL Server error number (e.g. 2627 for a unique key violation), or `null` when the error did
-   * not come from SQL Server (e.g. a value rejected by the driver before sending it).
-   */
-  number: number | null;
-  /** Error message. */
-  message: string;
-}
-
-/**
  * Result of {@link SqlClient.insertMany}.
  */
 export interface InsertManyResult {
@@ -64,12 +28,25 @@ export interface InsertManyResult {
    */
   ids: Array<number | null>;
   /** Rows that failed. Always empty in `'rollback'` mode (it throws instead). */
-  failures: InsertManyFailure[];
+  failures: RowFailure[];
 }
 
-interface BatchResult {
-  failures: Array<{ i: number; number: number | null; message: string }>;
-  ids: Array<{ i: number; id: number | null }>;
+/**
+ * Result of {@link SqlClient.merge}.
+ */
+export interface MergeResult {
+  /** Rows that did not exist and were inserted. */
+  inserted: number;
+  /** Rows that existed and were updated. */
+  updated: number;
+  /** Rows that existed and were left untouched (`update: false`, or nothing to update). */
+  skipped: number;
+  /** What happened to each input row, aligned with the input. `null` for failed rows. */
+  actions: Array<RowAction | null>;
+  /** Identity generated for inserted rows, aligned with the input. `null` otherwise. */
+  ids: Array<number | null>;
+  /** Rows that failed. Always empty in `'rollback'` mode (it throws instead). */
+  failures: RowFailure[];
 }
 
 /**
@@ -144,20 +121,20 @@ export class SqlClient {
    * Rows are sent in chunks; each chunk is a single T-SQL batch. Rows may have different columns.
    *
    * - `onError: 'rollback'` (default): runs in a transaction. If any row fails, nothing is
-   *   persisted and an {@link InsertManyError} is thrown with the failing row's `index`.
+   *   persisted and a {@link BatchRowError} is thrown with the failing row's `index`.
    * - `onError: 'continue'`: every row is attempted and this method never throws once connected;
    *   failures are returned in `result.failures`. If a whole chunk is rejected (e.g. an unknown
    *   column, or a value the driver refuses), its rows are retried one by one to find the culprits.
    *
    * @param table - Table name, optionally schema-qualified (`dbo.Users`).
    * @param rows - Rows to insert.
-   * @param options - See {@link InsertManyOptions}.
+   * @param options - See {@link BatchOptions}.
    *
    * @example
    * try {
    *   const { ids } = await client.insertMany('dbo.Users', [{ name: 'Ana' }, { name: 'Luis' }]);
    * } catch (error) {
-   *   if (error instanceof InsertManyError) {
+   *   if (error instanceof BatchRowError) {
    *     console.error(`Row ${error.index} failed`, error.row, error.sqlMessage);
    *   }
    * }
@@ -165,121 +142,152 @@ export class SqlClient {
   public async insertMany(
     table: string,
     rows: SqlRow[],
-    options: InsertManyOptions = {},
+    options: BatchOptions = {},
   ): Promise<InsertManyResult> {
-    const { onError = 'rollback', chunkSize = 500 } = options;
     const result: InsertManyResult = { inserted: 0, ids: rows.map(() => null), failures: [] };
 
     if (rows.length === 0) {
       return result;
     }
 
-    const pool = await this.connect();
-    const chunks = chunkRows(rows, chunkSize);
+    const target = quoteIdentifier(table);
+    const { outcomes, failures } = await executeBatch(
+      await this.connect(),
+      rows,
+      options,
+      (row, request, offset) =>
+        `${buildInsertStatement(target, row, request, offset)} ${track('inserted', 'SCOPE_IDENTITY()')}`,
+    );
 
-    if (onError === 'continue') {
-      for (const indexes of chunks) {
-        this.collect(result, rows, await this.runBatchOrRowByRow(pool, table, rows, indexes));
-      }
-
-      return result;
-    }
-
-    const transaction = pool.transaction();
-
-    await transaction.begin();
-
-    try {
-      for (const indexes of chunks) {
-        const batch = await this.runBatch(transaction.request(), table, rows, indexes, onError);
-        const [failure] = batch.failures;
-
-        if (failure) {
-          throw new InsertManyError(
-            failure.i,
-            rows[failure.i] ?? {},
-            failure.number,
-            failure.message,
-          );
-        }
-
-        this.collect(result, rows, batch);
-      }
-
-      await transaction.commit();
-    } catch (error) {
-      await this.rollbackQuietly(transaction);
-
-      throw error instanceof SqlClientError
-        ? error
-        : new SqlClientError('insertMany failed', { cause: error });
-    }
-
-    return result;
-  }
-
-  private async runBatch(
-    request: sql.Request,
-    table: string,
-    rows: SqlRow[],
-    indexes: number[],
-    onError: InsertManyOnError,
-  ): Promise<BatchResult> {
-    const batch = buildInsertBatch(table, rows, indexes, request, onError);
-    const { recordsets } = await request.query(batch);
-    const [failures = [], ids = []] = recordsets as unknown as [
-      BatchResult['failures'],
-      BatchResult['ids'],
-    ];
-
-    return { failures, ids };
-  }
-
-  /**
-   * Runs a chunk in `'continue'` mode. When the whole batch is rejected (a compile error, or a
-   * value the driver refuses before sending), retries its rows one by one so each failure is
-   * attributed to its row and the remaining rows still get inserted.
-   */
-  private async runBatchOrRowByRow(
-    pool: sql.ConnectionPool,
-    table: string,
-    rows: SqlRow[],
-    indexes: number[],
-  ): Promise<BatchResult> {
-    try {
-      return await this.runBatch(pool.request(), table, rows, indexes, 'continue');
-    } catch {
-      const batch: BatchResult = { failures: [], ids: [] };
-
-      for (const i of indexes) {
-        try {
-          batch.ids.push({ i, id: await this.insertOne(pool.request(), table, rows[i] ?? {}) });
-        } catch (error) {
-          batch.failures.push({ i, ...describeError(error) });
-        }
-      }
-
-      return batch;
-    }
-  }
-
-  private async rollbackQuietly(transaction: sql.Transaction): Promise<void> {
-    try {
-      await transaction.rollback();
-    } catch {
-      // Already rolled back by SQL Server (e.g. XACT_ABORT); the original error is what matters.
-    }
-  }
-
-  private collect(result: InsertManyResult, rows: SqlRow[], batch: BatchResult): void {
-    for (const { i, id } of batch.ids) {
+    for (const { i, id } of outcomes) {
       result.ids[i] = id;
       result.inserted += 1;
     }
 
-    for (const { i, number, message } of batch.failures) {
-      result.failures.push({ index: i, row: rows[i] ?? {}, number, message });
+    result.failures = failures;
+
+    return result;
+  }
+
+  /**
+   * Inserts rows that don't exist yet and updates the ones that do ("upsert"), matching on `on`.
+   *
+   * Each row runs `IF EXISTS … UPDATE … ELSE INSERT` under an `UPDLOCK, SERIALIZABLE` lock, so it
+   * is safe under concurrency, works on tables with triggers and pinpoints the failing row. It
+   * shares chunking and `onError` behavior with {@link SqlClient.insertMany}.
+   *
+   * @param table - Table name, optionally schema-qualified (`dbo.Users`).
+   * @param rows - Rows to merge. Each must include the `on` columns.
+   * @param options - See {@link MergeOptions}.
+   *
+   * @example
+   * const { inserted, updated, actions } = await client.merge(
+   *   'dbo.Users',
+   *   [
+   *     { email: 'ana@example.com', name: 'Ana' },
+   *     { email: 'luis@example.com', name: 'Luis' },
+   *   ],
+   *   { on: 'email' },
+   * );
+   * // actions → ['updated', 'inserted']
+   */
+  public async merge(table: string, rows: SqlRow[], options: MergeOptions): Promise<MergeResult> {
+    const keys = normalizeKeys(options.on);
+
+    if (keys.length === 0) {
+      throw new SqlClientError('merge requires at least one key column in `on`');
     }
+
+    keys.forEach(quoteIdentifier);
+
+    const result: MergeResult = {
+      inserted: 0,
+      updated: 0,
+      skipped: 0,
+      actions: rows.map(() => null),
+      ids: rows.map(() => null),
+      failures: [],
+    };
+
+    if (rows.length === 0) {
+      return result;
+    }
+
+    const { outcomes, failures } = await executeBatch(
+      await this.connect(),
+      rows,
+      options,
+      buildMergeStatement(table, keys, options.update),
+      missingKey(keys),
+    );
+
+    for (const { i, action, id } of outcomes) {
+      result.actions[i] = action;
+      result.ids[i] = id;
+      result[action] += 1;
+    }
+
+    result.failures = failures;
+
+    return result;
+  }
+
+  /**
+   * Updates the rows matching `where` and returns how many were affected.
+   *
+   * `where` is a set of column/value equalities joined with `AND` (`null` matches `IS NULL`). It
+   * must not be empty, so a whole table can't be updated by accident.
+   *
+   * @param table - Table name, optionally schema-qualified (`dbo.Users`).
+   * @param values - Columns to set.
+   * @param where - Columns identifying the rows to update.
+   * @returns Number of rows updated.
+   *
+   * @example
+   * await client.update('dbo.Users', { name: 'Ana María' }, { id: 42 }); // → 1
+   */
+  public async update(table: string, values: SqlRow, where: SqlRow): Promise<number> {
+    const whereKeys = requireWhere('update', where);
+
+    if (Object.keys(values).length === 0) {
+      throw new SqlClientError('update requires at least one column to set');
+    }
+
+    const pool = await this.connect();
+    const request = pool.request();
+    const set = bindRow(values, request, 0);
+    const match = bindRow(where, request, set.size);
+    const assignments = [...set].map(([column, param]) => `${quoteIdentifier(column)} = ${param}`);
+    const result = await request.query(
+      `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')} WHERE ${keyPredicate(whereKeys, where, match)};`,
+    );
+
+    return result.rowsAffected[0] ?? 0;
+  }
+
+  /**
+   * Deletes the rows matching `where` and returns how many were removed.
+   *
+   * `where` is a set of column/value equalities joined with `AND` (`null` matches `IS NULL`). It
+   * must not be empty, so a whole table can't be emptied by accident.
+   *
+   * @param table - Table name, optionally schema-qualified (`dbo.Users`).
+   * @param where - Columns identifying the rows to delete.
+   * @returns Number of rows deleted.
+   *
+   * @example
+   * await client.delete('dbo.Sessions', { userId: 42 }); // → 3
+   */
+  public async delete(table: string, where: SqlRow): Promise<number> {
+    const whereKeys = requireWhere('delete', where);
+    const pool = await this.connect();
+    const request = pool.request();
+    const match = bindRow(where, request, 0);
+    const result = await request.query(
+      `DELETE FROM ${quoteIdentifier(table)} WHERE ${keyPredicate(whereKeys, where, match)};`,
+    );
+
+    return result.rowsAffected[0] ?? 0;
   }
 
   /**
@@ -297,11 +305,12 @@ export class SqlClient {
   }
 }
 
-const describeError = (error: unknown): { number: number | null; message: string } => {
-  const number = (error as { number?: unknown } | null)?.number;
+const requireWhere = (operation: string, where: SqlRow): string[] => {
+  const keys = Object.keys(where);
 
-  return {
-    number: typeof number === 'number' ? number : null,
-    message: error instanceof Error ? error.message : String(error),
-  };
+  if (keys.length === 0) {
+    throw new SqlClientError(`${operation} requires a non-empty \`where\``);
+  }
+
+  return keys;
 };

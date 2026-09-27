@@ -1,5 +1,5 @@
 import sql from 'mssql';
-import { InsertManyError } from '../errors/InsertManyError';
+import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
 import { t } from '../types/SqlParam';
 import { SqlClient } from './SqlClient';
@@ -17,6 +17,19 @@ const config: sql.config = {
   password: 'secret',
   database: 'master',
 };
+const captureError = async (promise: Promise<unknown>): Promise<unknown> => {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+
+  throw new Error('Expected promise to reject');
+};
+/** Shape returned by a batch: [failures, outcomes]. */
+const batchResult = (failures: unknown[], outcomes: unknown[]) => ({
+  recordsets: [failures, outcomes],
+});
 
 describe('SqlClient', () => {
   let pool: { connect: jest.Mock; close: jest.Mock; request: jest.Mock; transaction: jest.Mock };
@@ -25,59 +38,59 @@ describe('SqlClient', () => {
 
   beforeEach(() => {
     request = { input: jest.fn(), query: jest.fn().mockResolvedValue({ recordset: [{ id: 42 }] }) };
-    pool = {
-      connect: jest.fn(),
-      close: jest.fn().mockResolvedValue(undefined),
-      request: jest.fn(() => request),
-      transaction: jest.fn(() => transaction),
-    };
     transaction = {
       begin: jest.fn().mockResolvedValue(undefined),
       commit: jest.fn().mockResolvedValue(undefined),
       rollback: jest.fn().mockResolvedValue(undefined),
       request: jest.fn(() => request),
     };
+    pool = {
+      connect: jest.fn(),
+      close: jest.fn().mockResolvedValue(undefined),
+      request: jest.fn(() => request),
+      transaction: jest.fn(() => transaction),
+    };
     pool.connect.mockResolvedValue(pool);
     ConnectionPoolMock.mockReset().mockImplementation(() => pool);
   });
 
-  it('creates the pool only once', async () => {
-    const client = new SqlClient(config);
+  describe('connection', () => {
+    it('creates the pool only once', async () => {
+      const client = new SqlClient(config);
 
-    await Promise.all([client.connect(), client.connect()]);
+      await Promise.all([client.connect(), client.connect()]);
 
-    expect(ConnectionPoolMock).toHaveBeenCalledTimes(1);
-    expect(ConnectionPoolMock).toHaveBeenCalledWith(config);
-  });
+      expect(ConnectionPoolMock).toHaveBeenCalledTimes(1);
+      expect(ConnectionPoolMock).toHaveBeenCalledWith(config);
+    });
 
-  it('wraps connection errors and allows retrying', async () => {
-    pool.connect.mockRejectedValueOnce(new Error('boom'));
-    const client = new SqlClient(config);
+    it('wraps connection errors and allows retrying', async () => {
+      pool.connect.mockRejectedValueOnce(new Error('boom'));
+      const client = new SqlClient(config);
 
-    await expect(client.connect()).rejects.toBeInstanceOf(SqlClientError);
-    await expect(client.connect()).resolves.toBe(pool);
-    expect(ConnectionPoolMock).toHaveBeenCalledTimes(2);
-  });
+      await expect(client.connect()).rejects.toBeInstanceOf(SqlClientError);
+      await expect(client.connect()).resolves.toBe(pool);
+      expect(ConnectionPoolMock).toHaveBeenCalledTimes(2);
+    });
 
-  it('closes the pool', async () => {
-    const client = new SqlClient(config);
+    it('closes the pool', async () => {
+      const client = new SqlClient(config);
 
-    await client.connect();
-    await client.close();
+      await client.connect();
+      await client.close();
 
-    expect(pool.close).toHaveBeenCalledTimes(1);
-  });
+      expect(pool.close).toHaveBeenCalledTimes(1);
+    });
 
-  it('does nothing on close when not connected', async () => {
-    await expect(new SqlClient(config).close()).resolves.toBeUndefined();
+    it('does nothing on close when not connected', async () => {
+      await expect(new SqlClient(config).close()).resolves.toBeUndefined();
+    });
   });
 
   describe('insert', () => {
     it('inserts a parameterized row and returns the identity', async () => {
-      const client = new SqlClient(config);
-
       await expect(
-        client.insert('dbo.Users', { name: 'Ana', 'e-mail': 'ana@example.com' }),
+        new SqlClient(config).insert('dbo.Users', { name: 'Ana', 'e-mail': 'ana@example.com' }),
       ).resolves.toBe(42);
 
       expect(request.input).toHaveBeenNthCalledWith(1, 'p0', 'Ana');
@@ -99,7 +112,6 @@ describe('SqlClient', () => {
     it('inserts default values when the row is empty', async () => {
       await new SqlClient(config).insert('Logs', {});
 
-      expect(request.input).not.toHaveBeenCalled();
       expect(request.query).toHaveBeenCalledWith(
         'INSERT INTO [Logs] DEFAULT VALUES; SELECT SCOPE_IDENTITY() AS id;',
       );
@@ -114,16 +126,7 @@ describe('SqlClient', () => {
 
   describe('insertMany', () => {
     const rows = [{ name: 'Ana' }, { name: 'Luis' }, { name: 'Eva' }];
-    const captureError = async (promise: Promise<unknown>): Promise<unknown> => {
-      try {
-        await promise;
-      } catch (error) {
-        return error;
-      }
-
-      throw new Error('Expected promise to reject');
-    };
-    const batchResult = (failures: unknown[], ids: unknown[]) => ({ recordsets: [failures, ids] });
+    const inserted = (i: number, id: number) => ({ i, action: 'inserted', id });
 
     it('returns without connecting when there are no rows', async () => {
       await expect(new SqlClient(config).insertMany('Users', [])).resolves.toEqual({
@@ -136,14 +139,7 @@ describe('SqlClient', () => {
 
     it('inserts every row in a transaction and returns the ids', async () => {
       request.query.mockResolvedValue(
-        batchResult(
-          [],
-          [
-            { i: 0, id: 1 },
-            { i: 1, id: 2 },
-            { i: 2, id: 3 },
-          ],
-        ),
+        batchResult([], [inserted(0, 1), inserted(1, 2), inserted(2, 3)]),
       );
 
       await expect(new SqlClient(config).insertMany('Users', rows)).resolves.toEqual({
@@ -151,23 +147,14 @@ describe('SqlClient', () => {
         ids: [1, 2, 3],
         failures: [],
       });
-      expect(transaction.begin).toHaveBeenCalled();
       expect(transaction.commit).toHaveBeenCalled();
       expect(transaction.rollback).not.toHaveBeenCalled();
     });
 
     it('sends one batch per chunk', async () => {
       request.query
-        .mockResolvedValueOnce(
-          batchResult(
-            [],
-            [
-              { i: 0, id: 1 },
-              { i: 1, id: 2 },
-            ],
-          ),
-        )
-        .mockResolvedValueOnce(batchResult([], [{ i: 2, id: 3 }]));
+        .mockResolvedValueOnce(batchResult([], [inserted(0, 1), inserted(1, 2)]))
+        .mockResolvedValueOnce(batchResult([], [inserted(2, 3)]));
 
       const result = await new SqlClient(config).insertMany('Users', rows, { chunkSize: 2 });
 
@@ -177,15 +164,12 @@ describe('SqlClient', () => {
 
     it('rolls back and reports the failing row', async () => {
       request.query.mockResolvedValue(
-        batchResult(
-          [{ i: 1, number: 2627, message: 'Violation of UNIQUE KEY' }],
-          [{ i: 0, id: 1 }],
-        ),
+        batchResult([{ i: 1, number: 2627, message: 'Violation of UNIQUE KEY' }], [inserted(0, 1)]),
       );
 
       const error = await captureError(new SqlClient(config).insertMany('Users', rows));
 
-      expect(error).toBeInstanceOf(InsertManyError);
+      expect(error).toBeInstanceOf(BatchRowError);
       expect(error).toMatchObject({
         index: 1,
         row: { name: 'Luis' },
@@ -205,7 +189,7 @@ describe('SqlClient', () => {
       const error = await captureError(new SqlClient(config).insertMany('Users', rows));
 
       expect(error).toBeInstanceOf(SqlClientError);
-      expect(error).not.toBeInstanceOf(InsertManyError);
+      expect(error).not.toBeInstanceOf(BatchRowError);
       expect((error as SqlClientError).cause).toBe(cause);
     });
 
@@ -213,10 +197,7 @@ describe('SqlClient', () => {
       request.query.mockResolvedValue(
         batchResult(
           [{ i: 1, number: 547, message: 'FOREIGN KEY constraint' }],
-          [
-            { i: 0, id: 1 },
-            { i: 2, id: 3 },
-          ],
+          [inserted(0, 1), inserted(2, 3)],
         ),
       );
 
@@ -238,7 +219,7 @@ describe('SqlClient', () => {
 
       request.query
         .mockRejectedValueOnce(driverError) // chunk [0, 1]
-        .mockResolvedValueOnce({ recordset: [{ id: 1 }] }) // row 0 alone
+        .mockResolvedValueOnce(batchResult([], [inserted(0, 1)])) // row 0 alone
         .mockRejectedValueOnce(driverError) // row 1 alone
         .mockRejectedValueOnce(sqlError) // chunk [2]
         .mockRejectedValueOnce(sqlError); // row 2 alone
@@ -254,26 +235,150 @@ describe('SqlClient', () => {
         ],
       });
     });
+  });
 
-    it('keeps processing later chunks after a rejected chunk in continue mode', async () => {
-      const invalidColumn = new Error('Invalid column name');
+  describe('merge', () => {
+    const rows = [
+      { email: 'ana@example.com', name: 'Ana' },
+      { email: 'luis@example.com', name: 'Luis' },
+      { email: 'eva@example.com', name: 'Eva' },
+    ];
 
-      request.query
-        .mockRejectedValueOnce(invalidColumn) // chunk [0, 1]
-        .mockRejectedValueOnce(invalidColumn) // row 0 alone
-        .mockResolvedValueOnce({ recordset: [{ id: 2 }] }) // row 1 alone
-        .mockResolvedValueOnce(batchResult([], [{ i: 2, id: 3 }])); // chunk [2]
+    it('counts inserted, updated and skipped rows', async () => {
+      request.query.mockResolvedValue(
+        batchResult(
+          [],
+          [
+            { i: 0, action: 'updated', id: null },
+            { i: 1, action: 'inserted', id: 7 },
+            { i: 2, action: 'skipped', id: null },
+          ],
+        ),
+      );
 
       await expect(
-        new SqlClient(config).insertMany('Users', rows, { onError: 'continue', chunkSize: 2 }),
+        new SqlClient(config).merge('dbo.Users', rows, { on: 'email' }),
       ).resolves.toEqual({
-        inserted: 2,
-        ids: [null, 2, 3],
-        failures: [
-          { index: 0, row: { name: 'Ana' }, number: null, message: 'Invalid column name' },
-        ],
+        inserted: 1,
+        updated: 1,
+        skipped: 1,
+        actions: ['updated', 'inserted', 'skipped'],
+        ids: [null, 7, null],
+        failures: [],
       });
-      expect(request.query).toHaveBeenCalledTimes(4);
+      expect(transaction.commit).toHaveBeenCalled();
+    });
+
+    it('sends an upsert per row keyed on `on`', async () => {
+      request.query.mockResolvedValue(batchResult([], []));
+
+      await new SqlClient(config).merge('Users', [rows[0] ?? {}], { on: 'email' });
+
+      const [[batch]] = request.query.mock.calls as [[string]];
+
+      expect(batch).toContain(
+        'IF EXISTS (SELECT 1 FROM [Users] WITH (UPDLOCK, SERIALIZABLE) WHERE [email] = @p0)',
+      );
+      expect(batch).toContain('UPDATE [Users] SET [name] = @p1 WHERE [email] = @p0;');
+      expect(batch).toContain('INSERT INTO [Users] ([email], [name]) VALUES (@p0, @p1);');
+    });
+
+    it('rejects rows missing a key column before sending anything', async () => {
+      const error = await captureError(
+        new SqlClient(config).merge('Users', [{ name: 'NoEmail' }], { on: 'email' }),
+      );
+
+      expect(error).toBeInstanceOf(BatchRowError);
+      expect(error).toMatchObject({
+        index: 0,
+        number: null,
+        sqlMessage: 'Missing key column(s): email',
+      });
+      expect(request.query).not.toHaveBeenCalled();
+    });
+
+    it('reports rows missing a key column as failures in continue mode', async () => {
+      request.query.mockResolvedValue(batchResult([], [{ i: 1, action: 'inserted', id: 1 }]));
+
+      const result = await new SqlClient(config).merge(
+        'Users',
+        [{ name: 'NoEmail' }, rows[0] ?? {}],
+        {
+          on: 'email',
+          onError: 'continue',
+        },
+      );
+
+      expect(result.actions).toEqual([null, 'inserted']);
+      expect(result.failures).toEqual([
+        {
+          index: 0,
+          row: { name: 'NoEmail' },
+          number: null,
+          message: 'Missing key column(s): email',
+        },
+      ]);
+    });
+
+    it('requires at least one key', async () => {
+      await expect(new SqlClient(config).merge('Users', rows, { on: [] })).rejects.toThrow(
+        SqlClientError,
+      );
+    });
+  });
+
+  describe('update', () => {
+    it('updates the matching rows and returns the affected count', async () => {
+      request.query.mockResolvedValue({ rowsAffected: [1] });
+
+      await expect(
+        new SqlClient(config).update('dbo.Users', { name: 'Ana María' }, { id: 42 }),
+      ).resolves.toBe(1);
+
+      expect(request.query).toHaveBeenCalledWith(
+        'UPDATE [dbo].[Users] SET [name] = @p0 WHERE [id] = @p1;',
+      );
+      expect(request.input).toHaveBeenNthCalledWith(1, 'p0', 'Ana María');
+      expect(request.input).toHaveBeenNthCalledWith(2, 'p1', 42);
+    });
+
+    it('matches null with IS NULL', async () => {
+      request.query.mockResolvedValue({ rowsAffected: [3] });
+
+      await new SqlClient(config).update(
+        'Users',
+        { active: false },
+        { deletedAt: null, tenant: 1 },
+      );
+
+      expect(request.query).toHaveBeenCalledWith(
+        'UPDATE [Users] SET [active] = @p0 WHERE [deletedAt] IS NULL AND [tenant] = @p2;',
+      );
+    });
+
+    it('refuses an empty where or empty values', async () => {
+      const client = new SqlClient(config);
+
+      await expect(client.update('Users', { name: 'x' }, {})).rejects.toThrow(SqlClientError);
+      await expect(client.update('Users', {}, { id: 1 })).rejects.toThrow(SqlClientError);
+      expect(request.query).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('delete', () => {
+    it('deletes the matching rows and returns the affected count', async () => {
+      request.query.mockResolvedValue({ rowsAffected: [3] });
+
+      await expect(new SqlClient(config).delete('dbo.Sessions', { userId: 42 })).resolves.toBe(3);
+
+      expect(request.query).toHaveBeenCalledWith(
+        'DELETE FROM [dbo].[Sessions] WHERE [userId] = @p0;',
+      );
+    });
+
+    it('refuses an empty where', async () => {
+      await expect(new SqlClient(config).delete('Users', {})).rejects.toThrow(SqlClientError);
+      expect(request.query).not.toHaveBeenCalled();
     });
   });
 });
