@@ -38,6 +38,15 @@ const result = await pool.request().query('SELECT 1 AS ok');
 await client.close();
 ```
 
+### Insert a row and get its id
+
+```ts
+const id = await client.insert('dbo.Users', { name: 'Ana', email: 'ana@example.com' });
+// → 42 (or null if the table has no identity column)
+```
+
+Values are sent as parameters and table/column names are bracket-quoted, so user input is never concatenated into the SQL.
+
 ## Scripts
 
 | Script | Description |
