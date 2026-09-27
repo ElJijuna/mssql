@@ -1,8 +1,8 @@
 import type sql from 'mssql';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
 import { type BatchOptions, type RowStatementBuilder, track } from './batch';
-import type { SqlRow } from './SqlClient';
 import { bindRow, insertSql, keyPredicate } from './statements';
+import type { SqlRow } from './types';
 
 /**
  * Options for {@link SqlClient.merge}.

@@ -2,7 +2,7 @@ import type sql from 'mssql';
 import type { QueryOptions, QueryRunner } from '../debug/debug';
 import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
-import type { SqlRow } from './SqlClient';
+import type { SqlRow } from './types';
 
 /**
  * SQL Server accepts at most 2100 parameters per request; keep some headroom.
@@ -139,6 +139,7 @@ export const buildBatch = (
   request: sql.Request,
   onError: BatchOnError,
   build: RowStatementBuilder,
+  nested = false,
 ): string => {
   let offset = 0;
 
@@ -148,11 +149,19 @@ export const buildBatch = (
 
     offset += Object.keys(row).length;
 
-    // Each row gets its own transaction in 'continue' mode so check-then-write statements keep
-    // their locks until the row is done.
-    return onError === 'continue'
-      ? `SET @_i = ${index};\nBEGIN TRY BEGIN TRAN; ${statement} COMMIT TRAN; END TRY\nBEGIN CATCH IF @@TRANCOUNT > 0 ROLLBACK TRAN; INSERT INTO @_errors VALUES (@_i, ERROR_NUMBER(), ERROR_MESSAGE()); END CATCH;`
-      : `SET @_i = ${index}; ${statement}`;
+    if (onError === 'rollback') {
+      return `SET @_i = ${index}; ${statement}`;
+    }
+
+    // Inside a caller's transaction each row gets a savepoint, so a failed row is undone without
+    // rolling back the caller's work.
+    if (nested) {
+      return `SET @_i = ${index}; SAVE TRAN _row;\nBEGIN TRY ${statement} END TRY\nBEGIN CATCH IF XACT_STATE() = 1 ROLLBACK TRAN _row; INSERT INTO @_errors VALUES (@_i, ERROR_NUMBER(), ERROR_MESSAGE()); END CATCH;`;
+    }
+
+    // Otherwise each row gets its own transaction so check-then-write statements keep their locks
+    // until the row is done.
+    return `SET @_i = ${index};\nBEGIN TRY BEGIN TRAN; ${statement} COMMIT TRAN; END TRY\nBEGIN CATCH IF @@TRANCOUNT > 0 ROLLBACK TRAN; INSERT INTO @_errors VALUES (@_i, ERROR_NUMBER(), ERROR_MESSAGE()); END CATCH;`;
   });
   const header = [
     'DECLARE @_i int;',
@@ -204,8 +213,12 @@ const runChunk = async (
   indexes: number[],
   onError: BatchOnError,
   build: RowStatementBuilder,
+  nested: boolean,
 ): Promise<BatchOutcome> => {
-  const { recordsets } = await query(request, buildBatch(rows, indexes, request, onError, build));
+  const { recordsets } = await query(
+    request,
+    buildBatch(rows, indexes, request, onError, build, nested),
+  );
   const [failures = [], outcomes = []] = recordsets as unknown as [
     Array<{ i: number; number: number | null; message: string }>,
     RowOutcome[],
@@ -227,19 +240,21 @@ const runChunk = async (
  */
 const runChunkOrRowByRow = async (
   query: QueryRunner,
-  pool: sql.ConnectionPool,
+  connection: BatchConnection,
   rows: SqlRow[],
   indexes: number[],
   build: RowStatementBuilder,
 ): Promise<BatchOutcome> => {
+  const { request, nested } = connection;
+
   try {
-    return await runChunk(query, pool.request(), rows, indexes, 'continue', build);
+    return await runChunk(query, request(), rows, indexes, 'continue', build, nested);
   } catch {
     const outcome: BatchOutcome = { outcomes: [], failures: [] };
 
     for (const i of indexes) {
       try {
-        const single = await runChunk(query, pool.request(), rows, [i], 'continue', build);
+        const single = await runChunk(query, request(), rows, [i], 'continue', build, nested);
 
         outcome.outcomes.push(...single.outcomes);
         outcome.failures.push(...single.failures);
@@ -251,19 +266,77 @@ const runChunkOrRowByRow = async (
     return outcome;
   }
 };
-const rollbackQuietly = async (transaction: sql.Transaction): Promise<void> => {
+
+/**
+ * Runs `rollback`, ignoring its errors: the transaction may already be rolled back by SQL Server
+ * (e.g. XACT_ABORT), and the original error is what matters.
+ *
+ * @internal
+ */
+export const rollbackQuietly = async (rollback: () => Promise<unknown>): Promise<void> => {
   try {
-    await transaction.rollback();
+    await rollback();
   } catch {
-    // Already rolled back by SQL Server (e.g. XACT_ABORT); the original error is what matters.
+    // Ignored on purpose.
   }
 };
+
+/**
+ * An all-or-nothing scope for `'rollback'` mode: a transaction, or a savepoint when already inside
+ * one.
+ *
+ * @internal
+ */
+export interface BatchScope {
+  request: () => sql.Request;
+  commit: () => Promise<void>;
+  rollback: () => Promise<void>;
+}
+
+/**
+ * Where a batch runs: directly on the pool, or inside a caller's transaction (`nested`).
+ *
+ * @internal
+ */
+export interface BatchConnection {
+  /** Creates a request for `'continue'` mode. */
+  request: () => sql.Request;
+  /** Opens the scope used by `'rollback'` mode. */
+  begin: () => Promise<BatchScope>;
+  /** Running inside a caller's transaction: per-row isolation uses savepoints. */
+  nested: boolean;
+}
+
+/**
+ * A {@link BatchConnection} on the pool: `'rollback'` mode opens its own transaction.
+ *
+ * @internal
+ */
+export const poolConnection = (pool: sql.ConnectionPool): BatchConnection => ({
+  request: () => pool.request(),
+  nested: false,
+  begin: async () => {
+    const transaction = pool.transaction();
+
+    await transaction.begin();
+
+    return {
+      request: () => transaction.request(),
+      commit: async () => {
+        await transaction.commit();
+      },
+      rollback: async () => {
+        await transaction.rollback();
+      },
+    };
+  },
+});
 
 /**
  * @internal
  */
 export interface ExecuteBatchParams {
-  pool: sql.ConnectionPool;
+  connection: BatchConnection;
   rows: SqlRow[];
   options: BatchOptions;
   build: RowStatementBuilder;
@@ -278,7 +351,7 @@ export interface ExecuteBatchParams {
  * @internal
  */
 export const executeBatch = async ({
-  pool,
+  connection,
   rows,
   options,
   build,
@@ -303,7 +376,7 @@ export const executeBatch = async ({
 
   if (onError === 'continue') {
     for (const indexes of chunks) {
-      const chunk = await runChunkOrRowByRow(query, pool, rows, indexes, build);
+      const chunk = await runChunkOrRowByRow(query, connection, rows, indexes, build);
 
       result.outcomes.push(...chunk.outcomes);
       result.failures.push(...chunk.failures);
@@ -320,13 +393,19 @@ export const executeBatch = async ({
     throw new BatchRowError(invalid.index, invalid.row, invalid.number, invalid.message);
   }
 
-  const transaction = pool.transaction();
-
-  await transaction.begin();
+  const scope = await connection.begin();
 
   try {
     for (const indexes of chunks) {
-      const chunk = await runChunk(query, transaction.request(), rows, indexes, 'rollback', build);
+      const chunk = await runChunk(
+        query,
+        scope.request(),
+        rows,
+        indexes,
+        'rollback',
+        build,
+        connection.nested,
+      );
       const [failure] = chunk.failures;
 
       if (failure) {
@@ -336,9 +415,9 @@ export const executeBatch = async ({
       result.outcomes.push(...chunk.outcomes);
     }
 
-    await transaction.commit();
+    await scope.commit();
   } catch (error) {
-    await rollbackQuietly(transaction);
+    await rollbackQuietly(scope.rollback);
 
     throw error instanceof SqlClientError
       ? error

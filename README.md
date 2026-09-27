@@ -7,6 +7,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Install](#install)
 - [Connect](#connect)
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
+- [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
 - [Error handling](#error-handling)
 - [Debug mode](#debug-mode)
@@ -60,6 +61,7 @@ In every helper, values are sent as parameters and table/column names are bracke
 | `merge(table, rows, { on, ... })` | `UPDATE` if exists, else `INSERT` | `{ inserted, updated, skipped, actions, ids, failures }` |
 | `update(table, values, where)` | `UPDATE … WHERE` | rows affected |
 | `delete(table, where)` | `DELETE … WHERE` | rows affected |
+| `transaction(async (tx) => …, options?)` | `BEGIN` … `COMMIT` / `ROLLBACK` | whatever the callback returns |
 
 ## Insert
 
@@ -163,6 +165,55 @@ const removed = await client.delete('dbo.Sessions', { userId: 42 });
 ```
 
 Same `where` rules as [update](#update): equalities joined with `AND`, `null` → `IS NULL`, and an empty `where` throws.
+
+## Transactions
+
+`client.transaction` commits when the callback resolves and rolls back when it throws (the error is rethrown). `tx` has the same helpers as the client:
+
+```ts
+const orderId = await client.transaction(async (tx) => {
+  const id = await tx.insert('dbo.Orders', { customerId: 7, total: t.decimal(99.9, 10, 2) });
+
+  await tx.insertMany('dbo.OrderLines', lines.map((line) => ({ ...line, orderId: id })));
+  await tx.update('dbo.Customers', { lastOrderId: id }, { id: 7 });
+
+  return id; // → transaction() resolves with it
+});
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `isolationLevel` | server default (`readCommitted`) | `'readUncommitted'`, `'readCommitted'`, `'repeatableRead'`, `'serializable'` or `'snapshot'` |
+
+```ts
+await client.transaction(async (tx) => { /* ... */ }, { isolationLevel: 'serializable' });
+```
+
+**Batches inside a transaction** use savepoints instead of their own transaction:
+
+- `onError: 'rollback'` undoes only the rows of that call. If you catch the `BatchRowError`, the rest of the transaction can still commit:
+
+  ```ts
+  await client.transaction(async (tx) => {
+    await tx.insert('dbo.Imports', { startedAt: new Date() });
+
+    try {
+      await tx.insertMany('dbo.Users', rows);
+    } catch (error) {
+      if (!(error instanceof BatchRowError)) throw error;
+      await tx.insert('dbo.ImportErrors', { index: error.index, message: error.sqlMessage });
+    }
+  }); // commits the import log and the error, without any of the users
+  ```
+
+- `onError: 'continue'` isolates each row with its own savepoint, so a failed row never undoes the caller's work.
+
+**Good to know**
+
+- Always `await` the operations. They run one after another (a transaction uses a single connection), so `Promise.all` inside a transaction is safe but not parallel. Operations left un-awaited are still finished before the commit.
+- Using `tx` after the callback returned throws `SqlClientError`.
+- `tx.request()` gives you a raw `mssql` request bound to the transaction for anything the helpers don't cover. Raw requests are not queued, so don't run them at the same time as other operations.
+- With `XACT_ABORT ON` or severe errors SQL Server dooms the whole transaction; the commit then fails and `transaction()` rolls back and throws.
 
 ## Typed parameters
 
@@ -268,12 +319,16 @@ client
 | `connect` | Pool opened | `durationMs` |
 | `connectFailure` | Pool failed to open | `durationMs`, `error` |
 | `close` | Pool closed | `{}` |
-| `query` | A query is about to be sent | `id`, `operation`, `sql`, `params` |
-| `success` | A query completed | `id`, `operation`, `sql`, `params`, `durationMs`, `rowsAffected` |
-| `failure` | A query failed (the method still throws) | `id`, `operation`, `sql`, `params`, `durationMs`, `error`, `number` |
+| `query` | A query is about to be sent | `id`, `operation`, `transactionId`, `sql`, `params` |
+| `success` | A query completed | `id`, `operation`, `transactionId`, `sql`, `params`, `durationMs`, `rowsAffected` |
+| `failure` | A query failed (the method still throws) | `id`, `operation`, `transactionId`, `sql`, `params`, `durationMs`, `error`, `number` |
 | `rowFailure` | A row of `insertMany` / `merge` failed, in both `onError` modes | `operation`, `index`, `row`, `number`, `message` |
+| `transactionBegin` | A transaction started | `transactionId` |
+| `transactionCommit` | A transaction committed | `transactionId`, `durationMs` |
+| `transactionRollback` | A transaction rolled back | `transactionId`, `durationMs`, `error` |
 
 - `id` correlates the `query`, `success` and `failure` of the same execution.
+- `transactionId` on `query` / `success` / `failure` links a query to its transaction (`null` outside one).
 - A batch query can emit `success` while some of its rows emitted `rowFailure` (`onError: 'continue'`).
 - A listener that throws never breaks the query: the error is caught and printed with `console.error`.
 - Unsubscribe with `off(event, listener)`, `off(event)` (all listeners), or an `AbortSignal`:

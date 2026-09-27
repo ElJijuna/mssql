@@ -1,13 +1,13 @@
 export type { BatchOnError, BatchOptions, RowAction, RowFailure } from './client/batch';
 export type { MergeOptions } from './client/merge';
-export type {
-  InsertManyResult,
-  MergeResult,
-  SqlClientConfig,
-  SqlClientOptions,
-  SqlRow,
-} from './client/SqlClient';
+export type { SqlClientOptions } from './client/SqlClient';
 export { SqlClient } from './client/SqlClient';
+export type {
+  SqlIsolationLevel,
+  SqlTransaction,
+  TransactionOptions,
+} from './client/SqlTransaction';
+export type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './client/types';
 export type {
   QueryOptions,
   SqlDebugEntry,
@@ -26,6 +26,9 @@ export type {
   SqlQueryEvent,
   SqlRowFailureEvent,
   SqlSuccessEvent,
+  SqlTransactionCommitEvent,
+  SqlTransactionEvent,
+  SqlTransactionRollbackEvent,
 } from './events/events';
 export type { Listener, SubscribeOptions } from './events/TypedEmitter';
 export { TypedEmitter } from './events/TypedEmitter';

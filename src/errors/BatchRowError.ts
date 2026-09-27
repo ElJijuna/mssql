@@ -1,4 +1,4 @@
-import type { SqlRow } from '../client/SqlClient';
+import type { SqlRow } from '../client/types';
 import { SqlClientError } from './SqlClientError';
 
 /**

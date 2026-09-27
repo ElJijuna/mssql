@@ -55,4 +55,12 @@ describe('buildBatch', () => {
     expect(batch).toContain('IF @@TRANCOUNT > 0 ROLLBACK TRAN;');
     expect(batch).toContain('INSERT INTO @_errors VALUES (@_i, ERROR_NUMBER(), ERROR_MESSAGE())');
   });
+
+  it('uses savepoints instead of transactions for continue mode inside a transaction', () => {
+    const batch = buildBatch(rows, [0, 1], fakeRequest(), 'continue', build, true);
+
+    expect(batch.match(/SAVE TRAN _row;/g)).toHaveLength(2);
+    expect(batch).toContain('IF XACT_STATE() = 1 ROLLBACK TRAN _row;');
+    expect(batch).not.toContain('BEGIN TRAN');
+  });
 });

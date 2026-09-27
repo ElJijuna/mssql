@@ -6,34 +6,21 @@ import {
   resolveLogger,
   type SqlDebugOption,
 } from '../debug/debug';
-import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlClientEvents, SqlOperation } from '../events/events';
 import { TypedEmitter } from '../events/TypedEmitter';
-import { quoteIdentifier } from '../utils/quoteIdentifier';
+import { type BatchOptions, describeError, poolConnection, rollbackQuietly } from './batch';
 import {
-  type BatchOptions,
-  type BatchOutcome,
-  describeError,
-  type ExecuteBatchParams,
-  executeBatch,
-  type RowAction,
-  type RowFailure,
-  track,
-} from './batch';
-import { buildMergeStatement, type MergeOptions, missingKey, normalizeKeys } from './merge';
-import { bindRow, buildInsertStatement, keyPredicate } from './statements';
-
-/**
- * Configuration accepted by {@link SqlClient}. Same shape as `mssql`'s `config`.
- */
-export type SqlClientConfig = sql.config;
-
-/**
- * Column/value pairs for a single row. Keys are column names; values are sent as parameters.
- * Use the {@link t} builders to set an explicit type, otherwise mssql infers it from the value.
- */
-export type SqlRow = Record<string, unknown>;
+  type CommandContext,
+  deleteCommand,
+  insertCommand,
+  insertManyCommand,
+  mergeCommand,
+  updateCommand,
+} from './commands';
+import type { MergeOptions } from './merge';
+import { type SqlIsolationLevel, SqlTransaction, type TransactionOptions } from './SqlTransaction';
+import type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './types';
 
 /**
  * Client-level options.
@@ -49,38 +36,13 @@ export interface SqlClientOptions {
   debug?: SqlDebugOption;
 }
 
-/**
- * Result of {@link SqlClient.insertMany}.
- */
-export interface InsertManyResult {
-  /** Number of rows inserted. */
-  inserted: number;
-  /**
-   * Generated identities aligned with the input rows. `null` for failed rows or tables without an
-   * identity column.
-   */
-  ids: Array<number | null>;
-  /** Rows that failed. Always empty in `'rollback'` mode (it throws instead). */
-  failures: RowFailure[];
-}
-
-/**
- * Result of {@link SqlClient.merge}.
- */
-export interface MergeResult {
-  /** Rows that did not exist and were inserted. */
-  inserted: number;
-  /** Rows that existed and were updated. */
-  updated: number;
-  /** Rows that existed and were left untouched (`update: false`, or nothing to update). */
-  skipped: number;
-  /** What happened to each input row, aligned with the input. `null` for failed rows. */
-  actions: Array<RowAction | null>;
-  /** Identity generated for inserted rows, aligned with the input. `null` otherwise. */
-  ids: Array<number | null>;
-  /** Rows that failed. Always empty in `'rollback'` mode (it throws instead). */
-  failures: RowFailure[];
-}
+const ISOLATION_LEVELS: Record<SqlIsolationLevel, sql.IIsolationLevel> = {
+  readUncommitted: sql.ISOLATION_LEVEL.READ_UNCOMMITTED,
+  readCommitted: sql.ISOLATION_LEVEL.READ_COMMITTED,
+  repeatableRead: sql.ISOLATION_LEVEL.REPEATABLE_READ,
+  serializable: sql.ISOLATION_LEVEL.SERIALIZABLE,
+  snapshot: sql.ISOLATION_LEVEL.SNAPSHOT,
+};
 
 /**
  * Thin wrapper around an `mssql` connection pool with helper methods.
@@ -97,13 +59,23 @@ export interface MergeResult {
 export class SqlClient extends TypedEmitter<SqlClientEvents> {
   private readonly config: SqlClientConfig;
   private readonly options: SqlClientOptions;
+  private readonly context: CommandContext;
   private poolPromise: Promise<sql.ConnectionPool> | undefined;
   private queryId = 0;
+  private transactionId = 0;
 
   public constructor(config: SqlClientConfig, options: SqlClientOptions = {}) {
     super();
     this.config = config;
     this.options = options;
+    this.context = {
+      runner: (operation, queryOptions) => this.runner(operation, queryOptions, null),
+      rowFailure: (event) => {
+        this.emit('rowFailure', event);
+      },
+      request: async () => (await this.connect()).request(),
+      connection: async () => poolConnection(await this.connect()),
+    };
   }
 
   /**
@@ -119,7 +91,11 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * Creates the function every helper uses to send SQL: prints it when debug is on and emits the
    * `query`, `success` and `failure` events.
    */
-  private runner(operation: SqlOperation, options: QueryOptions): QueryRunner {
+  private runner(
+    operation: SqlOperation,
+    options: QueryOptions,
+    transactionId: number | null,
+  ): QueryRunner {
     const logger = resolveLogger(this.options.debug, options.debug);
 
     return async (request, text) => {
@@ -134,7 +110,13 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
       }
 
       const entry = createDebugEntry(operation, request, text);
-      const event = { id: ++this.queryId, operation, sql: entry.sql, params: entry.params };
+      const event = {
+        id: ++this.queryId,
+        operation,
+        transactionId,
+        sql: entry.sql,
+        params: entry.params,
+      };
 
       logger?.(entry);
       this.emit('query', event);
@@ -164,36 +146,6 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     };
   }
 
-  /**
-   * Runs a batch helper and emits `rowFailure` for every failed row, in both `onError` modes.
-   */
-  private async runBatch(
-    operation: SqlOperation,
-    params: ExecuteBatchParams,
-  ): Promise<BatchOutcome> {
-    try {
-      const outcome = await executeBatch(params);
-
-      for (const failure of outcome.failures) {
-        this.emit('rowFailure', { ...failure, operation });
-      }
-
-      return outcome;
-    } catch (error) {
-      if (error instanceof BatchRowError) {
-        this.emit('rowFailure', {
-          operation,
-          index: error.index,
-          row: error.row,
-          number: error.number,
-          message: error.sqlMessage,
-        });
-      }
-
-      throw error;
-    }
-  }
-
   private async openPool(): Promise<sql.ConnectionPool> {
     const start = performance.now();
 
@@ -208,6 +160,71 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
       this.emit('connectFailure', { durationMs: performance.now() - start, error });
 
       throw new SqlClientError('Failed to connect to SQL Server', { cause: error });
+    }
+  }
+
+  /**
+   * Runs `work` in a transaction: commits when it resolves, rolls back when it throws (and
+   * rethrows). Resolves with whatever `work` returns.
+   *
+   * `tx` has the same helpers as the client (`insert`, `insertMany`, `merge`, `update`,
+   * `delete`) plus `tx.request()` for raw queries. Batch helpers inside a transaction use
+   * savepoints, so a failed `insertMany` in `'rollback'` mode only undoes its own rows; if you
+   * catch its error the transaction can still commit the rest.
+   *
+   * @param work - Receives the transaction. Always `await` its operations.
+   * @param options - See {@link TransactionOptions}.
+   *
+   * @example
+   * const orderId = await client.transaction(async (tx) => {
+   *   const id = await tx.insert('dbo.Orders', { customerId: 7, total: t.decimal(99.9, 10, 2) });
+   *   await tx.insertMany('dbo.OrderLines', lines.map((line) => ({ ...line, orderId: id })));
+   *   await tx.update('dbo.Customers', { lastOrderId: id }, { id: 7 });
+   *   return id;
+   * });
+   */
+  public async transaction<TResult>(
+    work: (tx: SqlTransaction) => Promise<TResult>,
+    options: TransactionOptions = {},
+  ): Promise<TResult> {
+    const pool = await this.connect();
+    const transaction = pool.transaction();
+    const transactionId = ++this.transactionId;
+
+    await transaction.begin(
+      options.isolationLevel ? ISOLATION_LEVELS[options.isolationLevel] : undefined,
+    );
+
+    const start = performance.now();
+    const tx = new SqlTransaction(transaction, transactionId, {
+      runner: (operation, queryOptions, id) => this.runner(operation, queryOptions, id),
+      rowFailure: (event) => {
+        this.emit('rowFailure', event);
+      },
+    });
+
+    this.emit('transactionBegin', { transactionId });
+
+    try {
+      const result = await work(tx);
+
+      await tx.settle();
+      tx.finish();
+      await transaction.commit();
+      this.emit('transactionCommit', { transactionId, durationMs: performance.now() - start });
+
+      return result;
+    } catch (error) {
+      await tx.settle();
+      tx.finish();
+      await rollbackQuietly(async () => transaction.rollback());
+      this.emit('transactionRollback', {
+        transactionId,
+        durationMs: performance.now() - start,
+        error,
+      });
+
+      throw error;
     }
   }
 
@@ -234,16 +251,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     row: SqlRow,
     options: QueryOptions = {},
   ): Promise<number | null> {
-    const pool = await this.connect();
-    const request = pool.request();
-    const insert = buildInsertStatement(quoteIdentifier(table), row, request);
-    const result = await this.runner('insert', options)(
-      request,
-      `${insert} SELECT SCOPE_IDENTITY() AS id;`,
-    );
-    const id = result.recordset[0]?.id;
-
-    return typeof id === 'number' ? id : null;
+    return insertCommand(this.context, table, row, options);
   }
 
   /**
@@ -275,30 +283,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     rows: SqlRow[],
     options: BatchOptions = {},
   ): Promise<InsertManyResult> {
-    const result: InsertManyResult = { inserted: 0, ids: rows.map(() => null), failures: [] };
-
-    if (rows.length === 0) {
-      return result;
-    }
-
-    const target = quoteIdentifier(table);
-    const { outcomes, failures } = await this.runBatch('insertMany', {
-      pool: await this.connect(),
-      rows,
-      options,
-      query: this.runner('insertMany', options),
-      build: (row, request, offset) =>
-        `${buildInsertStatement(target, row, request, offset)} ${track('inserted', 'SCOPE_IDENTITY()')}`,
-    });
-
-    for (const { i, id } of outcomes) {
-      result.ids[i] = id;
-      result.inserted += 1;
-    }
-
-    result.failures = failures;
-
-    return result;
+    return insertManyCommand(this.context, table, rows, options);
   }
 
   /**
@@ -324,45 +309,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * // actions → ['updated', 'inserted']
    */
   public async merge(table: string, rows: SqlRow[], options: MergeOptions): Promise<MergeResult> {
-    const keys = normalizeKeys(options.on);
-
-    if (keys.length === 0) {
-      throw new SqlClientError('merge requires at least one key column in `on`');
-    }
-
-    keys.forEach(quoteIdentifier);
-
-    const result: MergeResult = {
-      inserted: 0,
-      updated: 0,
-      skipped: 0,
-      actions: rows.map(() => null),
-      ids: rows.map(() => null),
-      failures: [],
-    };
-
-    if (rows.length === 0) {
-      return result;
-    }
-
-    const { outcomes, failures } = await this.runBatch('merge', {
-      pool: await this.connect(),
-      rows,
-      options,
-      query: this.runner('merge', options),
-      build: buildMergeStatement(table, keys, options.update),
-      validate: missingKey(keys),
-    });
-
-    for (const { i, action, id } of outcomes) {
-      result.actions[i] = action;
-      result.ids[i] = id;
-      result[action] += 1;
-    }
-
-    result.failures = failures;
-
-    return result;
+    return mergeCommand(this.context, table, rows, options);
   }
 
   /**
@@ -386,23 +333,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     where: SqlRow,
     options: QueryOptions = {},
   ): Promise<number> {
-    const whereKeys = requireWhere('update', where);
-
-    if (Object.keys(values).length === 0) {
-      throw new SqlClientError('update requires at least one column to set');
-    }
-
-    const pool = await this.connect();
-    const request = pool.request();
-    const set = bindRow(values, request, 0);
-    const match = bindRow(where, request, set.size);
-    const assignments = [...set].map(([column, param]) => `${quoteIdentifier(column)} = ${param}`);
-    const result = await this.runner('update', options)(
-      request,
-      `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')} WHERE ${keyPredicate(whereKeys, where, match)};`,
-    );
-
-    return result.rowsAffected[0] ?? 0;
+    return updateCommand(this.context, table, values, where, options);
   }
 
   /**
@@ -420,16 +351,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * await client.delete('dbo.Sessions', { userId: 42 }); // → 3
    */
   public async delete(table: string, where: SqlRow, options: QueryOptions = {}): Promise<number> {
-    const whereKeys = requireWhere('delete', where);
-    const pool = await this.connect();
-    const request = pool.request();
-    const match = bindRow(where, request, 0);
-    const result = await this.runner('delete', options)(
-      request,
-      `DELETE FROM ${quoteIdentifier(table)} WHERE ${keyPredicate(whereKeys, where, match)};`,
-    );
-
-    return result.rowsAffected[0] ?? 0;
+    return deleteCommand(this.context, table, where, options);
   }
 
   /**
@@ -447,13 +369,3 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     this.emit('close', {});
   }
 }
-
-const requireWhere = (operation: string, where: SqlRow): string[] => {
-  const keys = Object.keys(where);
-
-  if (keys.length === 0) {
-    throw new SqlClientError(`${operation} requires a non-empty \`where\``);
-  }
-
-  return keys;
-};

@@ -1,7 +1,7 @@
 import type sql from 'mssql';
 import { bindInput, SqlParam } from '../types/SqlParam';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
-import type { SqlRow } from './SqlClient';
+import type { SqlRow } from './types';
 
 /**
  * Binds every value of `row` to `request` as `@p{offset}`, `@p{offset + 1}`… and returns the

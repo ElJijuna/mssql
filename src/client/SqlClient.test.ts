@@ -485,6 +485,7 @@ describe('SqlClient', () => {
       const sent = {
         id: 1,
         operation: 'delete',
+        transactionId: null,
         sql: 'DELETE FROM [Users] WHERE [active] = @p0;',
         params: [],
       };

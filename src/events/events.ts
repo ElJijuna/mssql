@@ -14,6 +14,8 @@ export interface SqlQueryEvent {
   id: number;
   /** Helper that produced the query. */
   operation: SqlOperation;
+  /** Transaction the query ran in (see {@link SqlClient.transaction}), or `null`. */
+  transactionId: number | null;
   /** SQL text exactly as sent, with `@p0`, `@p1`… placeholders. */
   sql: string;
   /** Bound parameters. */
@@ -67,6 +69,30 @@ export interface SqlConnectFailureEvent extends SqlConnectEvent {
 }
 
 /**
+ * A transaction started.
+ */
+export interface SqlTransactionEvent {
+  /** Correlates the transaction events with the `transactionId` of its queries. */
+  transactionId: number;
+}
+
+/**
+ * A transaction committed.
+ */
+export interface SqlTransactionCommitEvent extends SqlTransactionEvent {
+  /** Time from `BEGIN` to `COMMIT`, in milliseconds. */
+  durationMs: number;
+}
+
+/**
+ * A transaction rolled back.
+ */
+export interface SqlTransactionRollbackEvent extends SqlTransactionCommitEvent {
+  /** The error that caused the rollback. */
+  error: unknown;
+}
+
+/**
  * Events emitted by {@link SqlClient}. Subscribe with `client.on(event, listener)`.
  */
 export interface SqlClientEvents {
@@ -84,4 +110,10 @@ export interface SqlClientEvents {
   failure: SqlFailureEvent;
   /** A row of `insertMany` / `merge` failed. */
   rowFailure: SqlRowFailureEvent;
+  /** A transaction started. */
+  transactionBegin: SqlTransactionEvent;
+  /** A transaction committed. */
+  transactionCommit: SqlTransactionCommitEvent;
+  /** A transaction rolled back. */
+  transactionRollback: SqlTransactionRollbackEvent;
 }
