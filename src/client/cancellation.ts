@@ -11,7 +11,11 @@ import { SqlClientError } from '../errors/SqlClientError';
 export interface CallGuard {
   /** Throws if the call was aborted or ran out of time. */
   check: () => void;
-  /** Runs a query, cancelling it on the server if the call is aborted or times out meanwhile. */
+  /**
+   * Runs a query, cancelling it on the server if the call is aborted or times out meanwhile. After
+   * cancelling, it waits for the driver to confirm before rejecting, so the connection is free again
+   * (e.g. for a transaction rollback) by the time the caller sees the error.
+   */
   run: <TResult>(request: sql.Request, query: Promise<TResult>) => Promise<TResult>;
 }
 
@@ -117,10 +121,17 @@ export const createCallGuard = (
           signal.removeEventListener('abort', listener);
         });
       };
+
+      let cancelled: SqlAbortError | undefined;
+
       const cancel = (error: SqlAbortError) => {
+        if (cancelled) {
+          return;
+        }
+
+        cancelled = error;
         cleanup();
         request.cancel();
-        reject(error);
       };
 
       for (const limit of limits) {
@@ -147,7 +158,8 @@ export const createCallGuard = (
         }
       }
 
-      // Settles the call with the query unless it was cancelled first (then this is a no-op).
+      // Settles once the driver is done with the request. A query that still finished after the
+      // cancel keeps its result (it was too late to stop); a cancelled one rejects with the reason.
       void (async () => {
         try {
           const result = await query;
@@ -156,7 +168,7 @@ export const createCallGuard = (
           resolve(result);
         } catch (error) {
           cleanup();
-          reject(error instanceof Error ? error : new SqlClientError(String(error)));
+          reject(cancelled ?? (error instanceof Error ? error : new SqlClientError(String(error))));
         }
       })();
     });

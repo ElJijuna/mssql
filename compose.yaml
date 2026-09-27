@@ -1,0 +1,18 @@
+# SQL Server for integration tests: npm run db:up && npm run test:integration
+# The password is only for this throwaway local container.
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: 'Y'
+      MSSQL_SA_PASSWORD: Pilmee_Test_2026!
+      MSSQL_PID: Developer
+    ports:
+      - '14330:1433'
+    healthcheck:
+      test: /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Pilmee_Test_2026!' -Q 'SELECT 1' -b
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

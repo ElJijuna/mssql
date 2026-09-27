@@ -6,6 +6,6 @@
         "moduleResolution": "node",
         "types": ["jest", "node"]
     },
-    "include": ["src"],
+    "include": ["src", "test"],
     "exclude": ["node_modules", "dist"]
 }

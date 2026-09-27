@@ -31,3 +31,8 @@ docs/
 
 # macOS
 .DS_Store
+
+# integration tests
+test/
+compose.yaml
+jest.integration.config.ts

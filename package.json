@@ -47,7 +47,10 @@
         "lint:fix": "eslint . --fix",
         "test": "jest",
         "test:coverage": "jest --coverage",
-        "docs": "typedoc"
+        "docs": "typedoc",
+        "db:up": "docker compose up -d --wait",
+        "db:down": "docker compose down -v",
+        "test:integration": "jest --config jest.integration.config.ts --runInBand"
     },
     "dependencies": {
         "@types/mssql": "^12.3.0"

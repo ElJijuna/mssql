@@ -462,10 +462,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * );
    * // rows → Order[], output.total → number | null
    */
-  public async exec<
-    TRow extends object = SqlRow,
-    TOutput extends ExecOutput = Record<string, never>,
-  >(
+  public async exec<TRow extends object = SqlRow, TOutput extends ExecOutput = ExecOutput>(
     procedure: string,
     params: SqlRow = {},
     options: ExecOptions<TOutput> = {},

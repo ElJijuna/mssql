@@ -907,13 +907,19 @@ describe('SqlClient', () => {
   });
 
   describe('signal and timeout', () => {
-    const pending = () => new Promise<never>(() => undefined);
+    /** A query that, like mssql, only settles (rejecting) once the request is cancelled. */
+    const pending = async () =>
+      new Promise<never>((_resolve, reject) => {
+        request.cancel.mockImplementation(() => {
+          reject(new Error('Canceled.'));
+        });
+      });
 
     it('cancels the query and rejects with SqlAbortError when the signal aborts', async () => {
       const controller = new AbortController();
       const failure = jest.fn();
 
-      request.query.mockReturnValue(pending());
+      request.query.mockImplementation(pending);
       const client = new SqlClient(config).on('failure', failure);
       const running = client.select('Users', {}, { signal: controller.signal });
 
@@ -937,7 +943,7 @@ describe('SqlClient', () => {
     });
 
     it('times out a slow query', async () => {
-      request.query.mockReturnValue(pending());
+      request.query.mockImplementation(pending);
 
       await expect(
         new SqlClient(config).query('WAITFOR DELAY @d', { d: '00:01' }, { timeout: 20 }),
@@ -949,7 +955,7 @@ describe('SqlClient', () => {
     });
 
     it('stops a continue-mode batch instead of reporting row failures', async () => {
-      request.query.mockReturnValue(pending());
+      request.query.mockImplementation(pending);
 
       await expect(
         new SqlClient(config).insertMany('Users', [{ name: 'Ana' }, { name: 'Luis' }], {
@@ -985,7 +991,7 @@ describe('SqlClient', () => {
     it('cancels the running query when the transaction signal aborts', async () => {
       const controller = new AbortController();
 
-      request.query.mockReturnValue(pending());
+      request.query.mockImplementation(pending);
       const running = new SqlClient(config).transaction(async (tx) => tx.select('Users'), {
         signal: controller.signal,
       });

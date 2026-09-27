@@ -605,6 +605,21 @@ Event payloads include parameter values (`params`, `row`); treat them like debug
 | `npm test` | Run unit tests (Jest) |
 | `npm run docs` | Generate API docs with TypeDoc (`super-configs/typedoc`) |
 | `npm run check` | Typecheck + lint + format check + tests |
+| `npm run db:up` | Start SQL Server 2022 in Docker for integration tests (port 14330, see `compose.yaml`) |
+| `npm run test:integration` | Run the integration tests against that server |
+| `npm run db:down` | Stop and remove the test server |
+
+### Integration tests
+
+Unit tests mock `mssql`; the integration tests in `test/integration` run the real T-SQL against SQL Server 2022 (batches with per-row `TRY/CATCH`, savepoints, `UPDLOCK/SERIALIZABLE` merges under concurrency, query cancellation, and debug scripts replayed on the server).
+
+```bash
+npm run db:up             # first run downloads the image (~1.5 GB); on Apple Silicon it runs under emulation
+npm run test:integration
+npm run db:down
+```
+
+They use the `pilmee_mssql_test` database (created automatically). Point them at another server with `MSSQL_HOST`, `MSSQL_PORT`, `MSSQL_USER`, `MSSQL_PASSWORD` and `MSSQL_DATABASE`. CI runs them on every pull request.
 
 ## License
 

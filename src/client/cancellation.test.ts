@@ -8,7 +8,19 @@ const fakeRequest = () => {
 
   return { cancel, request: { cancel } as unknown as sql.Request };
 };
-const never = () => new Promise<never>(() => undefined);
+/** A running query that, like mssql, rejects once `request.cancel()` is called. */
+const cancellable = () => {
+  let rejectQuery: (error: Error) => void = () => undefined;
+
+  const query = new Promise<never>((_resolve, reject) => {
+    rejectQuery = reject;
+  });
+  const cancel = jest.fn(() => {
+    rejectQuery(new Error('Canceled.'));
+  });
+
+  return { query, cancel, request: { cancel } as unknown as sql.Request };
+};
 const sleep = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const captureError = async (promise: Promise<unknown>): Promise<unknown> => {
   try {
@@ -37,9 +49,9 @@ describe('createCallGuard', () => {
   });
 
   it('cancels the running query when the signal aborts', async () => {
-    const { request, cancel } = fakeRequest();
+    const { request, cancel, query } = cancellable();
     const controller = new AbortController();
-    const running = createCallGuard('select', { signal: controller.signal }).run(request, never());
+    const running = createCallGuard('select', { signal: controller.signal }).run(request, query);
 
     controller.abort();
     const error = await captureError(running);
@@ -54,31 +66,94 @@ describe('createCallGuard', () => {
   });
 
   it('cancels the running query when the timeout passes', async () => {
-    const { request, cancel } = fakeRequest();
-    const error = await captureError(
-      createCallGuard('merge', { timeout: 20 }).run(request, never()),
-    );
+    const { request, cancel, query } = cancellable();
+    const error = await captureError(createCallGuard('merge', { timeout: 20 }).run(request, query));
 
     expect(error).toMatchObject({ reason: 'timeout', message: 'merge timed out after 20 ms' });
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it('shares one deadline across every query of the call', async () => {
-    const { request } = fakeRequest();
     const guard = createCallGuard('insertMany', { timeout: 30 });
 
-    await guard.run(request, sleep(20));
+    await guard.run(fakeRequest().request, sleep(20));
 
-    await expect(guard.run(request, never())).rejects.toMatchObject({ reason: 'timeout' });
+    const second = cancellable();
+
+    await expect(guard.run(second.request, second.query)).rejects.toMatchObject({
+      reason: 'timeout',
+    });
+  });
+
+  it('waits for the driver to confirm the cancel before rejecting', async () => {
+    let finishQuery: (error: Error) => void = () => undefined;
+
+    const query = new Promise<never>((_resolve, reject) => {
+      finishQuery = reject;
+    });
+    const events: string[] = [];
+    const running = createCallGuard('select', { timeout: 10 }).run(fakeRequest().request, query);
+
+    void (async () => {
+      try {
+        await running;
+      } catch {
+        events.push('rejected');
+      }
+    })();
+
+    await sleep(40);
+    events.push('driver confirms');
+    finishQuery(new Error('Canceled.'));
+    await expect(running).rejects.toMatchObject({ reason: 'timeout' });
+
+    expect(events).toEqual(['driver confirms', 'rejected']);
+  });
+
+  it('keeps the result of a query that finished despite the cancel', async () => {
+    const controller = new AbortController();
+    const finished = (async () => {
+      await sleep(20);
+
+      return 'done';
+    })();
+    const running = createCallGuard('select', { signal: controller.signal }).run(
+      fakeRequest().request,
+      finished,
+    );
+
+    controller.abort();
+
+    await expect(running).resolves.toBe('done');
+  });
+
+  it('cancels only once when several limits fire', async () => {
+    let finishQuery: (error: Error) => void = () => undefined;
+
+    const query = new Promise<never>((_resolve, reject) => {
+      finishQuery = reject;
+    });
+    const { request, cancel } = fakeRequest();
+    const controller = new AbortController();
+    const running = createCallGuard('select', { signal: controller.signal, timeout: 5 }).run(
+      request,
+      query,
+    );
+
+    await sleep(20);
+    controller.abort();
+    finishQuery(new Error('Canceled.'));
+
+    await expect(running).rejects.toMatchObject({ reason: 'timeout' });
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it('removes its listeners when the query settles', async () => {
-    const { request } = fakeRequest();
     const controller = new AbortController();
     const remove = jest.spyOn(controller.signal, 'removeEventListener');
 
     await createCallGuard('select', { signal: controller.signal, timeout: 1000 }).run(
-      request,
+      fakeRequest().request,
       Promise.resolve('ok'),
     );
 
@@ -86,19 +161,21 @@ describe('createCallGuard', () => {
   });
 
   it('keeps the query error when nothing was cancelled', async () => {
-    const { request } = fakeRequest();
     const failure = new Error('Invalid object name');
 
     await expect(
-      createCallGuard('select', { timeout: 1000 }).run(request, Promise.reject(failure)),
+      createCallGuard('select', { timeout: 1000 }).run(
+        fakeRequest().request,
+        Promise.reject(failure),
+      ),
     ).rejects.toBe(failure);
   });
 
   it('reports the scope when its limit is hit first', async () => {
-    const { request } = fakeRequest();
+    const { request, query } = cancellable();
     const scope = createScope('transaction', { timeout: 10 });
     const error = await captureError(
-      createCallGuard('update', { timeout: 1000 }, scope).run(request, never()),
+      createCallGuard('update', { timeout: 1000 }, scope).run(request, query),
     );
 
     expect(error).toMatchObject({ operation: 'transaction', reason: 'timeout' });

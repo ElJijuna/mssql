@@ -165,10 +165,7 @@ export class SqlTransaction {
   }
 
   /** Transaction version of {@link SqlClient.exec}. */
-  public async exec<
-    TRow extends object = SqlRow,
-    TOutput extends ExecOutput = Record<string, never>,
-  >(
+  public async exec<TRow extends object = SqlRow, TOutput extends ExecOutput = ExecOutput>(
     procedure: string,
     params: SqlRow = {},
     options: ExecOptions<TOutput> = {},
