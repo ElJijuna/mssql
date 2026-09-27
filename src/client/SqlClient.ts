@@ -9,6 +9,8 @@ import {
 import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlClientEvents, SqlOperation } from '../events/events';
 import { TypedEmitter } from '../events/TypedEmitter';
+import { SqlFileLoader } from '../files/SqlFileLoader';
+import type { SqlParams } from '../sql/bindNamed';
 import { type BatchOptions, describeError, poolConnection, rollbackQuietly } from './batch';
 import {
   type CommandContext,
@@ -28,6 +30,7 @@ import {
   execCommand,
 } from './exec';
 import type { MergeOptions } from './merge';
+import { type QueryResult, queryCommand, queryFileCommand, type RawQueryOptions } from './query';
 import { type SqlIsolationLevel, SqlTransaction, type TransactionOptions } from './SqlTransaction';
 import type { FindOneOptions, SelectOptions } from './select';
 import type { SqlWhere } from './statements';
@@ -45,6 +48,19 @@ export interface SqlClientOptions {
    * new SqlClient(config, { debug: process.env.NODE_ENV === 'development' });
    */
   debug?: SqlDebugOption;
+  /**
+   * Base directory for {@link SqlClient.queryFile}. Relative file paths resolve against it and
+   * may not escape it. Prefer a URL so it doesn't depend on the working directory.
+   *
+   * @example
+   * new SqlClient(config, { sqlDir: new URL('./sql', import.meta.url) });
+   */
+  sqlDir?: string | URL;
+  /**
+   * Keep SQL files in memory after the first read. Defaults to `true`; turn it off in development
+   * to pick up edits without restarting.
+   */
+  cacheSqlFiles?: boolean;
 }
 
 const ISOLATION_LEVELS: Record<SqlIsolationLevel, sql.IIsolationLevel> = {
@@ -71,6 +87,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   private readonly config: SqlClientConfig;
   private readonly options: SqlClientOptions;
   private readonly context: CommandContext;
+  private readonly sqlFiles: SqlFileLoader;
   private poolPromise: Promise<sql.ConnectionPool> | undefined;
   private queryId = 0;
   private transactionId = 0;
@@ -79,7 +96,9 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     super();
     this.config = config;
     this.options = options;
+    this.sqlFiles = new SqlFileLoader(options.sqlDir, options.cacheSqlFiles ?? true);
     this.context = {
+      sqlFile: async (file) => this.sqlFiles.load(file),
       runner: (operation, queryOptions) => this.runner(operation, queryOptions, null),
       rowFailure: (event) => {
         this.emit('rowFailure', event);
@@ -208,6 +227,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
 
     const start = performance.now();
     const tx = new SqlTransaction(transaction, transactionId, {
+      sqlFile: async (file) => this.sqlFiles.load(file),
       runner: (operation, queryOptions, id) => this.runner(operation, queryOptions, id),
       rowFailure: (event) => {
         this.emit('rowFailure', event);
@@ -441,6 +461,64 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     options: ExecOptions<TOutput> = {},
   ): Promise<ExecResult<TRow, ExecOutputValues<TOutput>>> {
     return execCommand<TRow, TOutput>(this.context, procedure, params, options);
+  }
+
+  /**
+   * Runs raw SQL with parameters by name — for anything the helpers don't cover (joins, ranges,
+   * `LIKE`, CTEs, functions…).
+   *
+   * Every `@name` in the SQL is bound from `params` (plain values or {@link t} builders). An array
+   * expands into a list, so `IN (@ids)` works. Missing parameters fail before sending; variables
+   * you `DECLARE` in the SQL don't count.
+   *
+   * @param sql - T-SQL text (one batch).
+   * @param params - Parameters by name; a leading `@` is optional.
+   * @param options - See {@link RawQueryOptions}.
+   *
+   * @example
+   * ```ts
+   * const { rows } = await client.query<User>(
+   *   'SELECT id, name FROM dbo.Users WHERE tenantId = @tenantId AND id IN (@ids)',
+   *   { tenantId: 7, ids: [1, 2, 3] },
+   * );
+   * ```
+   */
+  public async query<TRow extends object = SqlRow>(
+    sql: string,
+    params: SqlParams = {},
+    options: RawQueryOptions = {},
+  ): Promise<QueryResult<TRow>> {
+    return queryCommand<TRow>(this.context, sql, params, options);
+  }
+
+  /**
+   * Runs the SQL in a `.sql` file, exactly like {@link SqlClient.query}.
+   *
+   * The path is relative to the `sqlDir` client option (or the working directory without it);
+   * the `.sql` extension is optional. Files are read once and cached (see `cacheSqlFiles`).
+   *
+   * @param file - Path to the file, e.g. `'users/get-by-tenant.sql'` or `'users/get-by-tenant'`.
+   * @param params - Parameters by name; a leading `@` is optional.
+   * @param options - See {@link RawQueryOptions}.
+   *
+   * @example
+   * ```ts
+   * // sql/users/get-by-tenant.sql:
+   * //   SELECT id, name FROM dbo.Users WHERE tenantId = @tenantId AND status IN (@statuses);
+   *
+   * const client = new SqlClient(config, { sqlDir: new URL('./sql', import.meta.url) });
+   * const { rows } = await client.queryFile<User>('users/get-by-tenant', {
+   *   tenantId: 7,
+   *   statuses: ['active', 'pending'],
+   * });
+   * ```
+   */
+  public async queryFile<TRow extends object = SqlRow>(
+    file: string,
+    params: SqlParams = {},
+    options: RawQueryOptions = {},
+  ): Promise<QueryResult<TRow>> {
+    return queryFileCommand<TRow>(this.context, file, params, options);
   }
 
   /**

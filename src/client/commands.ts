@@ -3,6 +3,7 @@ import type { QueryOptions, QueryRunner } from '../debug/debug';
 import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlOperation, SqlRowFailureEvent } from '../events/events';
+import type { SqlFile } from '../files/SqlFileLoader';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
 import {
   type BatchConnection,
@@ -31,6 +32,8 @@ export interface CommandContext {
   connection: () => Promise<BatchConnection>;
   /** Reports a failed batch row. */
   rowFailure: (event: SqlRowFailureEvent) => void;
+  /** Loads a SQL file (cached, relative to `sqlDir`). */
+  sqlFile: (file: string) => Promise<SqlFile>;
 }
 
 const requireWhere = (operation: string, where: SqlWhere): void => {

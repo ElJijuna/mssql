@@ -12,7 +12,9 @@ export type SqlOperation =
   | 'merge'
   | 'update'
   | 'delete'
-  | 'exec';
+  | 'exec'
+  | 'query'
+  | 'queryFile';
 
 /**
  * A query about to be sent.

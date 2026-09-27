@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import sql from 'mssql';
 import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
@@ -756,6 +759,143 @@ describe('SqlClient', () => {
 
     it('rejects an empty procedure name', async () => {
       await expect(new SqlClient(config).exec(' ')).rejects.toThrow(SqlClientError);
+    });
+  });
+
+  describe('query', () => {
+    const useRealRequest = (): { realRequest: sql.Request; query: jest.SpyInstance } => {
+      const realRequest = new sql.Request();
+      const query = jest.spyOn(realRequest, 'query').mockResolvedValue({
+        recordsets: [[{ id: 1 }], [{ total: 1 }]],
+        recordset: [{ id: 1 }],
+        rowsAffected: [1, 1],
+        output: {},
+      } as never);
+
+      pool.request.mockReturnValue(realRequest);
+
+      return { realRequest, query };
+    };
+
+    it('binds named parameters, expands arrays and maps the result', async () => {
+      const { realRequest, query } = useRealRequest();
+      const result = await new SqlClient(config).query<{ id: number }>(
+        'SELECT id FROM dbo.Users WHERE tenantId = @tenantId AND id IN (@ids); SELECT COUNT(*) AS total FROM dbo.Users;',
+        { tenantId: 7, ids: [1, 2] },
+      );
+
+      expect(query).toHaveBeenCalledWith(
+        'SELECT id FROM dbo.Users WHERE tenantId = @tenantId AND id IN (@ids__0, @ids__1); SELECT COUNT(*) AS total FROM dbo.Users;',
+      );
+      expect(Object.keys(realRequest.parameters)).toEqual(['tenantId', 'ids__0', 'ids__1']);
+      expect(result).toEqual({
+        rows: [{ id: 1 }],
+        recordsets: [[{ id: 1 }], [{ total: 1 }]],
+        rowsAffected: [1, 1],
+      });
+    });
+
+    it('fails before sending when a parameter is missing', async () => {
+      const { query } = useRealRequest();
+
+      await expect(new SqlClient(config).query('SELECT * FROM T WHERE a = @a', {})).rejects.toThrow(
+        'query is missing parameter(s): @a',
+      );
+      expect(query).not.toHaveBeenCalled();
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
+    it('can skip parameter validation', async () => {
+      useRealRequest();
+
+      await expect(
+        new SqlClient(config).query(
+          'EXEC sp_executesql @stmt',
+          { stmt: 'SELECT 1' },
+          { validateParams: false },
+        ),
+      ).resolves.toMatchObject({ rows: [{ id: 1 }] });
+    });
+
+    it('rejects empty SQL', async () => {
+      await expect(new SqlClient(config).query('  ')).rejects.toThrow(SqlClientError);
+    });
+  });
+
+  describe('queryFile', () => {
+    let dir: string;
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'pilmee-mssql-client-'));
+      await writeFile(
+        join(dir, 'get-users.sql'),
+        'SELECT id FROM dbo.Users WHERE status IN (@statuses);',
+      );
+    });
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    it('runs the file relative to sqlDir', async () => {
+      const realRequest = new sql.Request();
+      const query = jest
+        .spyOn(realRequest, 'query')
+        .mockResolvedValue({ recordsets: [[{ id: 3 }]], rowsAffected: [1] } as never);
+
+      pool.request.mockReturnValue(realRequest);
+
+      const { rows } = await new SqlClient(config, { sqlDir: dir }).queryFile('get-users', {
+        statuses: ['active', 'pending'],
+      });
+
+      expect(rows).toEqual([{ id: 3 }]);
+      expect(query).toHaveBeenCalledWith(
+        'SELECT id FROM dbo.Users WHERE status IN (@statuses__0, @statuses__1);',
+      );
+    });
+
+    it('names the file in debug output and errors', async () => {
+      const realRequest = new sql.Request();
+      const logger = jest.fn();
+
+      jest
+        .spyOn(realRequest, 'query')
+        .mockResolvedValue({ recordsets: [[]], rowsAffected: [0] } as never);
+
+      pool.request.mockReturnValue(realRequest);
+      const client = new SqlClient(config, { sqlDir: dir, debug: logger });
+
+      await client.queryFile('get-users', { statuses: ['active'] });
+      await expect(client.queryFile('get-users')).rejects.toThrow(
+        'get-users.sql is missing parameter(s): @statuses',
+      );
+
+      expect(logger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'queryFile',
+          sql: '-- get-users.sql\nSELECT id FROM dbo.Users WHERE status IN (@statuses__0);',
+        }),
+      );
+    });
+
+    it('runs inside a transaction', async () => {
+      const realRequest = new sql.Request();
+
+      jest
+        .spyOn(realRequest, 'query')
+        .mockResolvedValue({ recordsets: [[{ id: 1 }]], rowsAffected: [1] } as never);
+
+      transaction.request.mockReturnValue(realRequest);
+
+      const rows = await new SqlClient(config, { sqlDir: dir }).transaction(async (tx) => {
+        const result = await tx.queryFile('get-users', { statuses: ['active'] });
+
+        return result.rows;
+      });
+
+      expect(rows).toEqual([{ id: 1 }]);
+      expect(transaction.commit).toHaveBeenCalled();
     });
   });
 });

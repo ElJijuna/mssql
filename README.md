@@ -8,7 +8,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Connect](#connect)
 - [Select / findOne](#select--findone) · [Where filters](#where-filters)
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
-- [Stored procedures](#stored-procedures) · [Transactions](#transactions)
+- [Raw SQL and .sql files](#raw-sql-and-sql-files) · [Stored procedures](#stored-procedures) · [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
 - [Error handling](#error-handling)
 - [Debug mode](#debug-mode)
@@ -64,6 +64,8 @@ In every helper, values are sent as parameters and table/column names are bracke
 | `merge(table, rows, { on, ... })` | `UPDATE` if exists, else `INSERT` | `{ inserted, updated, skipped, actions, ids, failures }` |
 | `update(table, values, where)` | `UPDATE … WHERE` | rows affected |
 | `delete(table, where)` | `DELETE … WHERE` | rows affected |
+| `query(sql, params?)` | any T-SQL, one batch | `{ rows, recordsets, rowsAffected }` |
+| `queryFile(file, params?)` | the SQL in a `.sql` file | `{ rows, recordsets, rowsAffected }` |
 | `exec(procedure, params?, { output? })` | `EXEC` (RPC) | `{ rows, recordsets, output, returnValue, rowsAffected }` |
 | `transaction(async (tx) => …, options?)` | `BEGIN` … `COMMIT` / `ROLLBACK` | whatever the callback returns |
 
@@ -111,7 +113,7 @@ Omit `where` to read every row. The generic types the rows (defaults to `Record<
 | `{ id: [] }` | `1 = 0` (matches nothing) |
 | `{ price: t.decimal(9.99, 10, 2) }` | `[price] = @p0` with an explicit type |
 
-For ranges, `LIKE`, `OR`, joins, etc., use `tx.request()` / the raw pool (`client.connect()`).
+For ranges, `LIKE`, `OR`, joins, etc., use [`query` / `queryFile`](#raw-sql-and-sql-files).
 
 ## Insert
 
@@ -217,6 +219,57 @@ const removed = await client.delete('dbo.Sessions', { userId: 42 });
 
 Same [where filters](#where-filters) as `update`, and an empty `where` throws.
 
+## Raw SQL and .sql files
+
+For anything the helpers don't cover (joins, ranges, `LIKE`, CTEs, functions…) write the SQL yourself and pass parameters by name. Keep it inline with `query`, or in `.sql` files with `queryFile`.
+
+```sql
+-- sql/users/get-by-tenant.sql
+DECLARE @limit int = 50;
+
+SELECT TOP (@limit) u.id, u.name, dbo.fnFullName(u.id) AS fullName
+FROM dbo.Users u
+WHERE u.tenantId = @tenantId
+  AND u.status IN (@statuses);
+```
+
+```ts
+const client = new SqlClient(config, {
+  sqlDir: new URL('./sql', import.meta.url), // base folder for queryFile
+});
+
+const { rows } = await client.queryFile<User>('users/get-by-tenant', {
+  tenantId: 7,
+  statuses: ['active', 'pending'], // arrays expand: IN (@statuses__0, @statuses__1)
+});
+
+// Same thing inline
+const { rows: admins } = await client.query<User>(
+  'SELECT id, name FROM dbo.Users WHERE tenantId = @tenantId AND role = @role',
+  { tenantId: 7, role: t.nvarchar('admin', 20) },
+);
+```
+
+**Parameters**
+
+- Every `@name` in the SQL is bound from `params` by name (`@` optional, case-insensitive), as plain values or `t.*` builders. Values are always sent as real parameters, never pasted into the SQL.
+- Arrays expand into a list, so `IN (@ids)` just works; an empty array becomes `IN (NULL)` (matches nothing).
+- A missing parameter fails **before connecting** with a clear message: `users/get-by-tenant.sql is missing parameter(s): @statuses`.
+- Variables you `DECLARE` in the SQL, `@@` functions, `EXEC` argument names (`EXEC p @arg = @value`) and anything inside comments or strings are not treated as parameters. If the check ever gets a statement wrong (e.g. dynamic SQL), pass `{ validateParams: false }`.
+
+**Files**
+
+| Client option | Default | Description |
+| --- | --- | --- |
+| `sqlDir` | working directory | Base folder (`string` or file `URL`). Paths may not escape it: `queryFile('../secret')` throws. `new URL('./sql', import.meta.url)` keeps it independent of where the process starts. |
+| `cacheSqlFiles` | `true` | Read each file once. Set `false` in development to pick up edits without restarting. |
+
+- The `.sql` extension is optional: `'users/get-by-tenant'` and `'users/get-by-tenant.sql'` are the same file.
+- One file = one batch. Files with `GO` separators are rejected (`GO` is an SSMS/sqlcmd feature, not T-SQL).
+- Your build must ship the `.sql` files: bundlers don't copy them. Copy the folder in your build step (or Dockerfile), or with Vite/esbuild import the text (`import text from './get-users.sql?raw'`) and use `client.query(text, params)`.
+- Debug output and events report operation `queryFile` and start the SQL with a `-- users/get-by-tenant.sql` comment.
+- Both work inside transactions: `tx.query(...)`, `tx.queryFile(...)`.
+
 ## Stored procedures
 
 ```ts
@@ -256,7 +309,7 @@ const { rows, output, returnValue } = await client.exec<Order>(
 
 ## Transactions
 
-`client.transaction` commits when the callback resolves and rolls back when it throws (the error is rethrown). `tx` has the same helpers as the client (`select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`):
+`client.transaction` commits when the callback resolves and rolls back when it throws (the error is rethrown). `tx` has the same helpers as the client (`select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`, `query`, `queryFile`):
 
 ```ts
 const orderId = await client.transaction(async (tx) => {
@@ -381,7 +434,7 @@ const client = new SqlClient(config, {
 
 | Field | Content |
 | --- | --- |
-| `operation` | `select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete` or `exec` |
+| `operation` | `select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`, `query` or `queryFile` |
 | `sql` | SQL text exactly as sent, with `@p0`, `@p1`… placeholders |
 | `params` | `[{ name, type, value }]`, e.g. `{ name: 'p0', type: 'nvarchar(100)', value: 'Ana' }` |
 | `script` | `DECLARE` per parameter + the SQL, ready to run |

@@ -2,6 +2,8 @@ import type sql from 'mssql';
 import type { QueryOptions, QueryRunner } from '../debug/debug';
 import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlOperation, SqlRowFailureEvent } from '../events/events';
+import type { SqlFile } from '../files/SqlFileLoader';
+import type { SqlParams } from '../sql/bindNamed';
 import type { BatchConnection, BatchOptions } from './batch';
 import {
   type CommandContext,
@@ -21,6 +23,7 @@ import {
   execCommand,
 } from './exec';
 import type { MergeOptions } from './merge';
+import { type QueryResult, queryCommand, queryFileCommand, type RawQueryOptions } from './query';
 import type { FindOneOptions, SelectOptions } from './select';
 import type { SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlRow } from './types';
@@ -51,6 +54,7 @@ export interface TransactionOptions {
 export interface TransactionHooks {
   runner: (operation: SqlOperation, options: QueryOptions, transactionId: number) => QueryRunner;
   rowFailure: (event: SqlRowFailureEvent) => void;
+  sqlFile: (file: string) => Promise<SqlFile>;
 }
 
 /**
@@ -78,6 +82,7 @@ export class SqlTransaction {
     this.context = {
       runner: (operation, options) => hooks.runner(operation, options, id),
       rowFailure: hooks.rowFailure,
+      sqlFile: hooks.sqlFile,
       request: async () => Promise.resolve(this.transaction.request()),
       connection: async () => Promise.resolve(this.connection()),
     };
@@ -161,6 +166,24 @@ export class SqlTransaction {
     return this.enqueue(async () =>
       execCommand<TRow, TOutput>(this.context, procedure, params, options),
     );
+  }
+
+  /** Transaction version of {@link SqlClient.query}. */
+  public async query<TRow extends object = SqlRow>(
+    sql: string,
+    params: SqlParams = {},
+    options: RawQueryOptions = {},
+  ): Promise<QueryResult<TRow>> {
+    return this.enqueue(async () => queryCommand<TRow>(this.context, sql, params, options));
+  }
+
+  /** Transaction version of {@link SqlClient.queryFile}. */
+  public async queryFile<TRow extends object = SqlRow>(
+    file: string,
+    params: SqlParams = {},
+    options: RawQueryOptions = {},
+  ): Promise<QueryResult<TRow>> {
+    return this.enqueue(async () => queryFileCommand<TRow>(this.context, file, params, options));
   }
 
   /**
