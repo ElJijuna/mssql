@@ -39,7 +39,7 @@ export class TypedEmitter<TEvents extends object> {
 
     const set = this.listeners.get(event) ?? new Set();
 
-    set.add(listener as Listener<never>);
+    set.add(listener);
     this.listeners.set(event, set);
     options.signal?.addEventListener('abort', () => this.off(event, listener), { once: true });
 
@@ -70,7 +70,7 @@ export class TypedEmitter<TEvents extends object> {
     listener?: Listener<TEvents[TEvent]>,
   ): this {
     if (listener) {
-      this.listeners.get(event)?.delete(listener as Listener<never>);
+      this.listeners.get(event)?.delete(listener);
     } else {
       this.listeners.delete(event);
     }

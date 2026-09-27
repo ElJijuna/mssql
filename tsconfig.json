@@ -11,7 +11,7 @@
         "module": "ESNext",
         "moduleResolution": "bundler",
         "lib": ["ES2022"],
-        "types": ["node"],
+        "types": ["node", "jest"],
         "strict": true,
         "noUncheckedIndexedAccess": true,
         "verbatimModuleSyntax": true,
@@ -19,12 +19,11 @@
         "declarationMap": true,
         "sourceMap": true,
         "outDir": "dist",
-        "rootDir": "src",
         "skipLibCheck": true,
         "esModuleInterop": true,
         "forceConsistentCasingInFileNames": true,
         "ignoreDeprecations": "6.0"
     },
-    "include": ["src"],
-    "exclude": ["node_modules", "dist", "**/*.test.ts"]
+    "include": ["src", "*.config.ts"],
+    "exclude": ["node_modules", "dist"]
 }

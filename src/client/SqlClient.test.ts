@@ -7,7 +7,10 @@ import { SqlClient } from './SqlClient';
 jest.mock('mssql', () => {
   const ConnectionPool = jest.fn();
 
-  return { __esModule: true, default: { ...jest.requireActual('mssql'), ConnectionPool } };
+  return {
+    __esModule: true,
+    default: { ...jest.requireActual<Record<string, unknown>>('mssql'), ConnectionPool },
+  };
 });
 
 const ConnectionPoolMock = sql.ConnectionPool as unknown as jest.Mock;
@@ -444,6 +447,8 @@ describe('SqlClient', () => {
   });
 
   describe('events', () => {
+    const anyDuration = expect.any(Number) as number;
+
     it('emits connect and close', async () => {
       const client = new SqlClient(config);
       const connect = jest.fn();
@@ -453,7 +458,7 @@ describe('SqlClient', () => {
       await client.connect();
       await client.close();
 
-      expect(connect).toHaveBeenCalledWith({ durationMs: expect.any(Number) });
+      expect(connect).toHaveBeenCalledWith({ durationMs: anyDuration });
       expect(close).toHaveBeenCalledWith({});
     });
 
@@ -465,7 +470,7 @@ describe('SqlClient', () => {
       const client = new SqlClient(config).on('connectFailure', listener);
 
       await expect(client.connect()).rejects.toThrow(SqlClientError);
-      expect(listener).toHaveBeenCalledWith({ durationMs: expect.any(Number), error: cause });
+      expect(listener).toHaveBeenCalledWith({ durationMs: anyDuration, error: cause });
     });
 
     it('emits query then success with a shared id', async () => {
@@ -487,7 +492,7 @@ describe('SqlClient', () => {
       expect(query).toHaveBeenCalledWith(sent);
       expect(success).toHaveBeenCalledWith({
         ...sent,
-        durationMs: expect.any(Number),
+        durationMs: anyDuration,
         rowsAffected: [2],
       });
     });

@@ -110,7 +110,9 @@ export const toLiteral = (value: unknown): string => {
     return `0x${value.toString('hex')}`;
   }
 
-  return `N'${String(value).replaceAll("'", "''")}'`;
+  const text = typeof value === 'string' ? value : (JSON.stringify(value) ?? '');
+
+  return `N'${text.replaceAll("'", "''")}'`;
 };
 
 /**

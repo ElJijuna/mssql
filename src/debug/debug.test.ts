@@ -70,6 +70,7 @@ describe('toLiteral', () => {
     [false, '0'],
     [Buffer.from('hi'), '0x6869'],
     ["it's", "N'it''s'"],
+    [{ a: 1 }, 'N\'{"a":1}\''],
   ])('formats %p as %s', (value, expected) => {
     expect(toLiteral(value)).toBe(expected);
   });
