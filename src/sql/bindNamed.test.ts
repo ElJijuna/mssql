@@ -61,3 +61,50 @@ describe('assertParameters', () => {
     );
   });
 });
+
+describe('nested queries', () => {
+  const salesPerDay = `
+    SELECT CAST(o.CreatedAt AS date) AS Day, o.StoreId, COUNT(*) AS Orders, SUM(o.Total) AS Revenue
+    FROM dbo.Orders AS o
+    WHERE o.CustomerId IN (
+            SELECT c.Id FROM dbo.Customers AS c
+            WHERE c.SegmentId IN (@segmentIds) OR c.Id IN (@customerIds)
+          )
+      AND (@allStores = 1 OR o.StoreId IN (@storeIds))
+      AND o.CreatedAt >= @from AND o.CreatedAt < @to
+    GROUP BY CAST(o.CreatedAt AS date), o.StoreId`;
+
+  it('finds parameters at every nesting level', () => {
+    expect(analyzeSql(salesPerDay).required).toEqual([
+      'segmentIds',
+      'customerIds',
+      'allStores',
+      'storeIds',
+      'from',
+      'to',
+    ]);
+  });
+
+  it('expands arrays inside subqueries and keeps the optional-filter pattern working', () => {
+    const { request, statement } = bind(salesPerDay, {
+      segmentIds: [1, 2],
+      customerIds: [],
+      allStores: true,
+      storeIds: [],
+      from: new Date('2026-01-01'),
+      to: new Date('2026-02-01'),
+    });
+
+    expect(statement).toContain(
+      'WHERE c.SegmentId IN (@segmentIds__0, @segmentIds__1) OR c.Id IN (NULL)',
+    );
+    expect(statement).toContain('AND (@allStores = 1 OR o.StoreId IN (NULL))');
+    expect(Object.keys(request.parameters)).toEqual([
+      'segmentIds__0',
+      'segmentIds__1',
+      'allStores',
+      'from',
+      'to',
+    ]);
+  });
+});

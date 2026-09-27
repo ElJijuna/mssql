@@ -257,6 +257,61 @@ const { rows: admins } = await client.query<User>(
 - A missing parameter fails **before connecting** with a clear message: `users/get-by-tenant.sql is missing parameter(s): @statuses`.
 - Variables you `DECLARE` in the SQL, `@@` functions, `EXEC` argument names (`EXEC p @arg = @value`) and anything inside comments or strings are not treated as parameters. If the check ever gets a statement wrong (e.g. dynamic SQL), pass `{ validateParams: false }`.
 
+**Nested queries**
+
+Subqueries, CTEs and derived tables need nothing special: parameters work at any nesting level and arrays expand wherever they appear. A report that keeps the SQL in a file:
+
+```sql
+-- sql/reports/sales-per-day.sql
+-- Orders and revenue per day and store, for customers in the given segments
+-- (or picked one by one), optionally limited to some stores.
+SELECT
+  CAST(o.CreatedAt AS date) AS Day,
+  o.StoreId,
+  COUNT(*)     AS Orders,
+  SUM(o.Total) AS Revenue
+FROM dbo.Orders AS o
+WHERE o.CustomerId IN (
+        SELECT c.Id
+        FROM dbo.Customers AS c
+        WHERE c.SegmentId IN (@segmentIds)
+           OR c.Id IN (@customerIds)
+      )
+  AND (@allStores = 1 OR o.StoreId IN (@storeIds))
+  AND o.CreatedAt >= @from
+  AND o.CreatedAt <  @to
+GROUP BY CAST(o.CreatedAt AS date), o.StoreId
+ORDER BY Day ASC, o.StoreId ASC;
+```
+
+```ts
+interface SalesPerDay {
+  Day: Date;
+  StoreId: number;
+  Orders: number;
+  Revenue: number;
+}
+
+const storeIds: number[] = []; // empty = every store
+
+const { rows } = await client.queryFile<SalesPerDay>('reports/sales-per-day', {
+  segmentIds: [1, 2],             // → IN (@segmentIds__0, @segmentIds__1)
+  customerIds: [501, 502, 503],
+  allStores: storeIds.length === 0,
+  storeIds,                       // [] → IN (NULL), ignored thanks to @allStores
+  from: t.datetime2(new Date('2026-01-01'), 3),
+  to: t.datetime2(new Date('2026-02-01'), 3),
+});
+```
+
+Tips for queries like this:
+
+- **Never build lists with template strings** (`IN (${ids})`): that is SQL injection and breaks on quotes. Pass an array instead.
+- **Parenthesize `OR`**: `A OR B AND C` means `A OR (B AND C)`. Keep the `OR` inside the subquery (or in its own parentheses) so the outer `AND` filters apply to every row.
+- **Optional filters**: an empty array matches nothing (`IN (NULL)`). For "empty means all", add a flag: `(@allStores = 1 OR o.StoreId IN (@storeIds))`.
+- **Day ranges on `datetime` columns**: use `>= @from AND < @to` (next day) instead of `BETWEEN`, which would drop the last day after midnight; group with `CAST(… AS date)`.
+- **Very large lists**: each array item is a parameter and SQL Server accepts at most 2100 per request. For thousands of ids, send them as JSON and read them with `OPENJSON` instead.
+
 **Files**
 
 | Client option | Default | Description |
