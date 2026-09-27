@@ -7,6 +7,8 @@ export type {
   SqlTransaction,
   TransactionOptions,
 } from './client/SqlTransaction';
+export type { FindOneOptions, SelectOptions, SqlOrderBy, SqlSortDirection } from './client/select';
+export type { SqlWhere } from './client/statements';
 export type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './client/types';
 export type {
   QueryOptions,

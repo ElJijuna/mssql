@@ -359,7 +359,7 @@ describe('SqlClient', () => {
       );
 
       expect(request.query).toHaveBeenCalledWith(
-        'UPDATE [Users] SET [active] = @p0 WHERE [deletedAt] IS NULL AND [tenant] = @p2;',
+        'UPDATE [Users] SET [active] = @p0 WHERE [deletedAt] IS NULL AND [tenant] = @p1;',
       );
     });
 
@@ -562,6 +562,79 @@ describe('SqlClient', () => {
       delete (request as Partial<typeof request>).parameters;
 
       await expect(new SqlClient(config).delete('Users', { id: 1 })).resolves.toBe(1);
+    });
+  });
+
+  describe('select', () => {
+    it('returns the rows of the recordset', async () => {
+      const rows = [{ id: 1, name: 'Ana' }];
+
+      request.query.mockResolvedValue({ recordset: rows, rowsAffected: [1] });
+
+      await expect(
+        new SqlClient(config).select<{ id: number; name: string }>(
+          'dbo.Users',
+          { role: ['admin', 'editor'] },
+          { columns: ['id', 'name'], orderBy: 'name', limit: 5 },
+        ),
+      ).resolves.toBe(rows);
+      expect(request.query).toHaveBeenCalledWith(
+        'SELECT TOP (5) [id], [name] FROM [dbo].[Users] WHERE [role] IN (@p0, @p1) ORDER BY [name] ASC;',
+      );
+    });
+
+    it('selects every row without a where', async () => {
+      request.query.mockResolvedValue({ recordset: [], rowsAffected: [0] });
+
+      await expect(new SqlClient(config).select('Users')).resolves.toEqual([]);
+      expect(request.query).toHaveBeenCalledWith('SELECT * FROM [Users];');
+    });
+  });
+
+  describe('findOne', () => {
+    it('returns the first row with TOP (1)', async () => {
+      request.query.mockResolvedValue({ recordset: [{ id: 1 }], rowsAffected: [1] });
+
+      await expect(
+        new SqlClient(config).findOne('Users', { email: 'ana@example.com' }),
+      ).resolves.toEqual({ id: 1 });
+      expect(request.query).toHaveBeenCalledWith(
+        'SELECT TOP (1) * FROM [Users] WHERE [email] = @p0;',
+      );
+    });
+
+    it('returns null when nothing matches', async () => {
+      request.query.mockResolvedValue({ recordset: [], rowsAffected: [0] });
+
+      await expect(new SqlClient(config).findOne('Users', { id: 404 })).resolves.toBeNull();
+    });
+
+    it('reports its own operation name', async () => {
+      const logger = jest.fn();
+
+      request.query.mockResolvedValue({ recordset: [], rowsAffected: [0] });
+      await new SqlClient(config, { debug: logger }).findOne('Users', { id: 1 });
+
+      expect(logger).toHaveBeenCalledWith(expect.objectContaining({ operation: 'findOne' }));
+    });
+  });
+
+  describe('where with arrays', () => {
+    it('supports IN in update and delete', async () => {
+      request.query.mockResolvedValue({ rowsAffected: [2] });
+      const client = new SqlClient(config);
+
+      await client.update('Users', { active: false }, { id: [1, 2] });
+      await client.delete('Sessions', { userId: [1, 2] });
+
+      expect(request.query).toHaveBeenNthCalledWith(
+        1,
+        'UPDATE [Users] SET [active] = @p0 WHERE [id] IN (@p1, @p2);',
+      );
+      expect(request.query).toHaveBeenNthCalledWith(
+        2,
+        'DELETE FROM [Sessions] WHERE [userId] IN (@p0, @p1);',
+      );
     });
   });
 });

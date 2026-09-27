@@ -4,7 +4,14 @@ import type { SqlDebugParam } from '../debug/debug';
 /**
  * Helper that produced a query.
  */
-export type SqlOperation = 'insert' | 'insertMany' | 'merge' | 'update' | 'delete';
+export type SqlOperation =
+  | 'select'
+  | 'findOne'
+  | 'insert'
+  | 'insertMany'
+  | 'merge'
+  | 'update'
+  | 'delete';
 
 /**
  * A query about to be sent.

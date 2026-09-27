@@ -6,6 +6,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 
 - [Install](#install)
 - [Connect](#connect)
+- [Select / findOne](#select--findone) · [Where filters](#where-filters)
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
 - [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
@@ -56,12 +57,60 @@ In every helper, values are sent as parameters and table/column names are bracke
 
 | Method | SQL | Returns |
 | --- | --- | --- |
+| `select(table, where?, options?)` | `SELECT … WHERE … ORDER BY … OFFSET` | rows |
+| `findOne(table, where?, options?)` | `SELECT TOP (1)` | row or `null` |
 | `insert(table, row)` | `INSERT` | generated id |
 | `insertMany(table, rows, options?)` | `INSERT` per row, batched | `{ inserted, ids, failures }` |
 | `merge(table, rows, { on, ... })` | `UPDATE` if exists, else `INSERT` | `{ inserted, updated, skipped, actions, ids, failures }` |
 | `update(table, values, where)` | `UPDATE … WHERE` | rows affected |
 | `delete(table, where)` | `DELETE … WHERE` | rows affected |
 | `transaction(async (tx) => …, options?)` | `BEGIN` … `COMMIT` / `ROLLBACK` | whatever the callback returns |
+
+## Select / findOne
+
+```ts
+interface User { id: number; name: string; email: string }
+
+const users = await client.select<User>('dbo.Users', { active: true });
+
+const page = await client.select<User>(
+  'dbo.Users',
+  { role: ['admin', 'editor'] },
+  { columns: ['id', 'name'], orderBy: { name: 'asc' }, limit: 20, offset: 40 },
+);
+// SELECT [id], [name] FROM [dbo].[Users] WHERE [role] IN (@p0, @p1)
+// ORDER BY [name] ASC OFFSET 40 ROWS FETCH NEXT 20 ROWS ONLY
+
+const user = await client.findOne<User>('dbo.Users', { email: 'ana@example.com' });
+// → User | null
+```
+
+Omit `where` to read every row. The generic types the rows (defaults to `Record<string, unknown>`).
+
+| Option | Description |
+| --- | --- |
+| `columns` | Columns to return. Default `*`. |
+| `orderBy` | `'name'`, `['lastName', 'firstName']` or `{ createdAt: 'desc', id: 'asc' }` (priority order). |
+| `limit` | Max rows (`select` only). Alone it becomes `TOP (n)`. |
+| `offset` | Rows to skip (`select` only). Requires `orderBy` so pages are stable; becomes `OFFSET … FETCH NEXT`. |
+| `debug` | Same as every helper. |
+
+`findOne` is `select` with `TOP (1)`: it returns the first match, or `null`. Pass `orderBy` to decide which row wins when several match.
+
+## Where filters
+
+`select`, `findOne`, `update` and `delete` share the same `where` object — equalities joined with `AND`:
+
+| Value | SQL |
+| --- | --- |
+| `{ id: 7 }` | `[id] = @p0` |
+| `{ deletedAt: null }` | `[deletedAt] IS NULL` |
+| `{ status: ['a', 'b'] }` | `[status] IN (@p0, @p1)` |
+| `{ status: ['a', null] }` | `([status] IN (@p0) OR [status] IS NULL)` |
+| `{ id: [] }` | `1 = 0` (matches nothing) |
+| `{ price: t.decimal(9.99, 10, 2) }` | `[price] = @p0` with an explicit type |
+
+For ranges, `LIKE`, `OR`, joins, etc., use `tx.request()` / the raw pool (`client.connect()`).
 
 ## Insert
 
@@ -148,14 +197,15 @@ const affected = await client.update('dbo.Users', { name: 'Ana María', active: 
 // → 1
 ```
 
-`where` is a set of equalities joined with `AND`; `null` becomes `IS NULL`:
+`where` follows the [where filters](#where-filters) rules:
 
 ```ts
-await client.update('dbo.Users', { active: false }, { tenantId: 7, deletedAt: null });
-// UPDATE [dbo].[Users] SET [active] = @p0 WHERE [tenantId] = @p1 AND [deletedAt] IS NULL
+await client.update('dbo.Users', { active: false }, { tenantId: 7, role: ['guest', 'trial'], deletedAt: null });
+// UPDATE [dbo].[Users] SET [active] = @p0
+// WHERE [tenantId] = @p1 AND [role] IN (@p2, @p3) AND [deletedAt] IS NULL
 ```
 
-An empty `where` throws `SqlClientError`, so you can't update a whole table by accident. For ranges, `IN`, `LIKE`, etc., use the raw pool (`client.connect()`).
+An empty `where` throws `SqlClientError`, so you can't update a whole table by accident.
 
 ## Delete
 
@@ -164,7 +214,7 @@ const removed = await client.delete('dbo.Sessions', { userId: 42 });
 // → 3
 ```
 
-Same `where` rules as [update](#update): equalities joined with `AND`, `null` → `IS NULL`, and an empty `where` throws.
+Same [where filters](#where-filters) as `update`, and an empty `where` throws.
 
 ## Transactions
 
@@ -217,7 +267,7 @@ await client.transaction(async (tx) => { /* ... */ }, { isolationLevel: 'seriali
 
 ## Typed parameters
 
-Plain values are typed by `mssql` from the JavaScript value. Use the `t` builders — named after the T-SQL types — to set the exact type and its dimensions. They work in every helper (`insert`, `insertMany`, `merge`, `update`, `delete`):
+Plain values are typed by `mssql` from the JavaScript value. Use the `t` builders — named after the T-SQL types — to set the exact type and its dimensions. They work in every helper, including `where` filters:
 
 ```ts
 import { t } from '@pilmee/mssql';
@@ -293,7 +343,7 @@ const client = new SqlClient(config, {
 
 | Field | Content |
 | --- | --- |
-| `operation` | `insert`, `insertMany`, `merge`, `update` or `delete` |
+| `operation` | `select`, `findOne`, `insert`, `insertMany`, `merge`, `update` or `delete` |
 | `sql` | SQL text exactly as sent, with `@p0`, `@p1`… placeholders |
 | `params` | `[{ name, type, value }]`, e.g. `{ name: 'p0', type: 'nvarchar(100)', value: 'Ana' }` |
 | `script` | `DECLARE` per parameter + the SQL, ready to run |

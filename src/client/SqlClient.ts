@@ -13,13 +13,17 @@ import { type BatchOptions, describeError, poolConnection, rollbackQuietly } fro
 import {
   type CommandContext,
   deleteCommand,
+  findOneCommand,
   insertCommand,
   insertManyCommand,
   mergeCommand,
+  selectCommand,
   updateCommand,
 } from './commands';
 import type { MergeOptions } from './merge';
 import { type SqlIsolationLevel, SqlTransaction, type TransactionOptions } from './SqlTransaction';
+import type { FindOneOptions, SelectOptions } from './select';
+import type { SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './types';
 
 /**
@@ -229,6 +233,54 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   }
 
   /**
+   * Reads the rows matching `where` (every row when omitted).
+   *
+   * `where` uses the same rules as {@link SqlClient.update}: equalities joined with `AND`, `null`
+   * → `IS NULL`, arrays → `IN (…)`. Type the rows with the generic parameter.
+   *
+   * @param table - Table or view name, optionally schema-qualified (`dbo.Users`).
+   * @param where - Filter. See {@link SqlWhere}.
+   * @param options - Columns, order and paging. See {@link SelectOptions}.
+   * @returns The matching rows (an empty array when none match).
+   *
+   * @example
+   * interface User { id: number; name: string }
+   *
+   * const page = await client.select<User>(
+   *   'dbo.Users',
+   *   { active: true, role: ['admin', 'editor'] },
+   *   { columns: ['id', 'name'], orderBy: { name: 'asc' }, limit: 20, offset: 40 },
+   * );
+   */
+  public async select<TRow extends object = SqlRow>(
+    table: string,
+    where: SqlWhere = {},
+    options: SelectOptions = {},
+  ): Promise<TRow[]> {
+    return selectCommand<TRow>(this.context, table, where, options);
+  }
+
+  /**
+   * Reads the first row matching `where`, or `null` when none match (`SELECT TOP (1)`).
+   * Use `orderBy` to decide which row wins when several match.
+   *
+   * @param table - Table or view name, optionally schema-qualified (`dbo.Users`).
+   * @param where - Filter. See {@link SqlWhere}.
+   * @param options - Columns and order. See {@link FindOneOptions}.
+   *
+   * @example
+   * const user = await client.findOne<User>('dbo.Users', { email: 'ana@example.com' });
+   * if (!user) throw new NotFoundError();
+   */
+  public async findOne<TRow extends object = SqlRow>(
+    table: string,
+    where: SqlWhere = {},
+    options: FindOneOptions = {},
+  ): Promise<TRow | null> {
+    return findOneCommand<TRow>(this.context, table, where, options);
+  }
+
+  /**
    * Inserts a single row and returns the identity value generated for it.
    *
    * Values are sent as parameters (never interpolated) and table/column names are
@@ -315,8 +367,8 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   /**
    * Updates the rows matching `where` and returns how many were affected.
    *
-   * `where` is a set of column/value equalities joined with `AND` (`null` matches `IS NULL`). It
-   * must not be empty, so a whole table can't be updated by accident.
+   * `where` is a set of column/value equalities joined with `AND` (`null` matches `IS NULL`,
+   * arrays match `IN (…)`). It must not be empty, so a whole table can't be updated by accident.
    *
    * @param table - Table name, optionally schema-qualified (`dbo.Users`).
    * @param values - Columns to set.
@@ -330,7 +382,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   public async update(
     table: string,
     values: SqlRow,
-    where: SqlRow,
+    where: SqlWhere,
     options: QueryOptions = {},
   ): Promise<number> {
     return updateCommand(this.context, table, values, where, options);
@@ -339,8 +391,8 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   /**
    * Deletes the rows matching `where` and returns how many were removed.
    *
-   * `where` is a set of column/value equalities joined with `AND` (`null` matches `IS NULL`). It
-   * must not be empty, so a whole table can't be emptied by accident.
+   * `where` is a set of column/value equalities joined with `AND` (`null` matches `IS NULL`,
+   * arrays match `IN (…)`). It must not be empty, so a whole table can't be emptied by accident.
    *
    * @param table - Table name, optionally schema-qualified (`dbo.Users`).
    * @param where - Columns identifying the rows to delete.
@@ -350,7 +402,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * @example
    * await client.delete('dbo.Sessions', { userId: 42 }); // → 3
    */
-  public async delete(table: string, where: SqlRow, options: QueryOptions = {}): Promise<number> {
+  public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
     return deleteCommand(this.context, table, where, options);
   }
 

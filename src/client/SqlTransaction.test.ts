@@ -78,6 +78,15 @@ describe('SqlClient.transaction', () => {
     expect(request.query).toHaveBeenCalledTimes(2);
   });
 
+  it('reads inside the transaction', async () => {
+    request.query.mockResolvedValue({ recordset: [{ id: 1, stock: 3 }], rowsAffected: [1] });
+
+    const product = await client.transaction(async (tx) => tx.findOne('Products', { id: 1 }));
+
+    expect(product).toEqual({ id: 1, stock: 3 });
+    expect(transaction.request).toHaveBeenCalled();
+  });
+
   it('rolls back and rethrows when the work throws', async () => {
     const failure = new Error('business rule');
 

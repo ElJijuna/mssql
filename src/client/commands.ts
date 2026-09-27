@@ -13,7 +13,8 @@ import {
   track,
 } from './batch';
 import { buildMergeStatement, type MergeOptions, missingKey, normalizeKeys } from './merge';
-import { bindRow, buildInsertStatement, keyPredicate } from './statements';
+import { buildSelect, type FindOneOptions, type SelectOptions } from './select';
+import { bindRow, bindWhere, buildInsertStatement, type SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlRow } from './types';
 
 /**
@@ -32,14 +33,10 @@ export interface CommandContext {
   rowFailure: (event: SqlRowFailureEvent) => void;
 }
 
-const requireWhere = (operation: string, where: SqlRow): string[] => {
-  const keys = Object.keys(where);
-
-  if (keys.length === 0) {
+const requireWhere = (operation: string, where: SqlWhere): void => {
+  if (Object.keys(where).length === 0) {
     throw new SqlClientError(`${operation} requires a non-empty \`where\``);
   }
-
-  return keys;
 };
 /**
  * Runs a batch and reports every failed row, in both `onError` modes.
@@ -184,10 +181,10 @@ export const updateCommand = async (
   ctx: CommandContext,
   table: string,
   values: SqlRow,
-  where: SqlRow,
+  where: SqlWhere,
   options: QueryOptions,
 ): Promise<number> => {
-  const whereKeys = requireWhere('update', where);
+  requireWhere('update', where);
 
   if (Object.keys(values).length === 0) {
     throw new SqlClientError('update requires at least one column to set');
@@ -195,11 +192,11 @@ export const updateCommand = async (
 
   const request = await ctx.request();
   const set = bindRow(values, request, 0);
-  const match = bindRow(where, request, set.size);
+  const { predicate } = bindWhere(where, request, set.size);
   const assignments = [...set].map(([column, param]) => `${quoteIdentifier(column)} = ${param}`);
   const result = await ctx.runner('update', options)(
     request,
-    `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')} WHERE ${keyPredicate(whereKeys, where, match)};`,
+    `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')} WHERE ${predicate};`,
   );
 
   return result.rowsAffected[0] ?? 0;
@@ -211,16 +208,48 @@ export const updateCommand = async (
 export const deleteCommand = async (
   ctx: CommandContext,
   table: string,
-  where: SqlRow,
+  where: SqlWhere,
   options: QueryOptions,
 ): Promise<number> => {
-  const whereKeys = requireWhere('delete', where);
+  requireWhere('delete', where);
+
   const request = await ctx.request();
-  const match = bindRow(where, request, 0);
+  const { predicate } = bindWhere(where, request, 0);
   const result = await ctx.runner('delete', options)(
     request,
-    `DELETE FROM ${quoteIdentifier(table)} WHERE ${keyPredicate(whereKeys, where, match)};`,
+    `DELETE FROM ${quoteIdentifier(table)} WHERE ${predicate};`,
   );
 
   return result.rowsAffected[0] ?? 0;
+};
+
+/**
+ * @internal
+ */
+export const selectCommand = async <TRow extends object>(
+  ctx: CommandContext,
+  table: string,
+  where: SqlWhere,
+  options: SelectOptions,
+  operation: 'select' | 'findOne' = 'select',
+): Promise<TRow[]> => {
+  const request = await ctx.request();
+  const statement = buildSelect(table, where, options, request);
+  const result = await ctx.runner(operation, options)(request, statement);
+
+  return result.recordset as unknown as TRow[];
+};
+
+/**
+ * @internal
+ */
+export const findOneCommand = async <TRow extends object>(
+  ctx: CommandContext,
+  table: string,
+  where: SqlWhere,
+  options: FindOneOptions,
+): Promise<TRow | null> => {
+  const [row] = await selectCommand<TRow>(ctx, table, where, { ...options, limit: 1 }, 'findOne');
+
+  return row ?? null;
 };

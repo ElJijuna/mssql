@@ -6,12 +6,16 @@ import type { BatchConnection, BatchOptions } from './batch';
 import {
   type CommandContext,
   deleteCommand,
+  findOneCommand,
   insertCommand,
   insertManyCommand,
   mergeCommand,
+  selectCommand,
   updateCommand,
 } from './commands';
 import type { MergeOptions } from './merge';
+import type { FindOneOptions, SelectOptions } from './select';
+import type { SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlRow } from './types';
 
 /**
@@ -82,6 +86,24 @@ export class SqlTransaction {
     return this.transaction.request();
   }
 
+  /** Transaction version of {@link SqlClient.select}. */
+  public async select<TRow extends object = SqlRow>(
+    table: string,
+    where: SqlWhere = {},
+    options: SelectOptions = {},
+  ): Promise<TRow[]> {
+    return this.enqueue(async () => selectCommand<TRow>(this.context, table, where, options));
+  }
+
+  /** Transaction version of {@link SqlClient.findOne}. */
+  public async findOne<TRow extends object = SqlRow>(
+    table: string,
+    where: SqlWhere = {},
+    options: FindOneOptions = {},
+  ): Promise<TRow | null> {
+    return this.enqueue(async () => findOneCommand<TRow>(this.context, table, where, options));
+  }
+
   /** Transaction version of {@link SqlClient.insert}. */
   public async insert(
     table: string,
@@ -109,14 +131,14 @@ export class SqlTransaction {
   public async update(
     table: string,
     values: SqlRow,
-    where: SqlRow,
+    where: SqlWhere,
     options: QueryOptions = {},
   ): Promise<number> {
     return this.enqueue(async () => updateCommand(this.context, table, values, where, options));
   }
 
   /** Transaction version of {@link SqlClient.delete}. */
-  public async delete(table: string, where: SqlRow, options: QueryOptions = {}): Promise<number> {
+  public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
     return this.enqueue(async () => deleteCommand(this.context, table, where, options));
   }
 
