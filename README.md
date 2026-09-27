@@ -8,7 +8,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Connect](#connect)
 - [Select / findOne](#select--findone) · [Where filters](#where-filters)
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
-- [Transactions](#transactions)
+- [Stored procedures](#stored-procedures) · [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
 - [Error handling](#error-handling)
 - [Debug mode](#debug-mode)
@@ -64,6 +64,7 @@ In every helper, values are sent as parameters and table/column names are bracke
 | `merge(table, rows, { on, ... })` | `UPDATE` if exists, else `INSERT` | `{ inserted, updated, skipped, actions, ids, failures }` |
 | `update(table, values, where)` | `UPDATE … WHERE` | rows affected |
 | `delete(table, where)` | `DELETE … WHERE` | rows affected |
+| `exec(procedure, params?, { output? })` | `EXEC` (RPC) | `{ rows, recordsets, output, returnValue, rowsAffected }` |
 | `transaction(async (tx) => …, options?)` | `BEGIN` … `COMMIT` / `ROLLBACK` | whatever the callback returns |
 
 ## Select / findOne
@@ -216,9 +217,46 @@ const removed = await client.delete('dbo.Sessions', { userId: 42 });
 
 Same [where filters](#where-filters) as `update`, and an empty `where` throws.
 
+## Stored procedures
+
+```ts
+interface Order { id: number; total: number }
+
+const { rows, output, returnValue } = await client.exec<Order>(
+  'dbo.GetCustomerOrders',
+  { customerId: 7, status: t.nvarchar('open', 20) },  // inputs by name (`@` optional)
+  { output: { total: t.int(null), lastOrder: t.datetime2(null, 3) } },
+);
+// rows             → Order[]           (first result set)
+// output.total     → number | null     (typed from the builder)
+// output.lastOrder → Date | string | null
+// returnValue      → number            (the procedure's RETURN, 0 by default)
+```
+
+| Result field | Content |
+| --- | --- |
+| `rows` | Rows of the first result set (`[]` when there is none) |
+| `recordsets` | Every result set, in order, for procedures that return several |
+| `output` | OUTPUT parameter values, typed from the `t.*` builders used |
+| `returnValue` | The procedure's `RETURN` value |
+| `rowsAffected` | Rows affected per statement |
+
+- Input values follow the same rules as everywhere else: plain values are typed by `mssql`, `t.*` sets the exact type.
+- OUTPUT parameters need a type, so they always use `t.*`. The value is sent as the initial value — use `null` for pure OUTPUT, or a value for INPUT/OUTPUT parameters.
+- The procedure runs as an RPC call (like `request.execute`), not as SQL text. Debug mode prints the equivalent runnable script:
+
+  ```sql
+  DECLARE @customerId int = 7;
+  DECLARE @total int = NULL;
+  EXEC [dbo].[GetCustomerOrders] @customerId = @customerId, @total = @total OUTPUT;
+  SELECT @total AS [total];
+  ```
+
+- Available on `tx` too: `tx.exec(...)` runs inside the transaction.
+
 ## Transactions
 
-`client.transaction` commits when the callback resolves and rolls back when it throws (the error is rethrown). `tx` has the same helpers as the client:
+`client.transaction` commits when the callback resolves and rolls back when it throws (the error is rethrown). `tx` has the same helpers as the client (`select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`):
 
 ```ts
 const orderId = await client.transaction(async (tx) => {
@@ -343,7 +381,7 @@ const client = new SqlClient(config, {
 
 | Field | Content |
 | --- | --- |
-| `operation` | `select`, `findOne`, `insert`, `insertMany`, `merge`, `update` or `delete` |
+| `operation` | `select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete` or `exec` |
 | `sql` | SQL text exactly as sent, with `@p0`, `@p1`… placeholders |
 | `params` | `[{ name, type, value }]`, e.g. `{ name: 'p0', type: 'nvarchar(100)', value: 'Ana' }` |
 | `script` | `DECLARE` per parameter + the SQL, ready to run |

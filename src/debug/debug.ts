@@ -166,10 +166,13 @@ export const resolveLogger = (
 
 /**
  * Runs `text` on `request`. Every helper query goes through one, so it can be logged and observed.
+ * `run` replaces the default `request.query(text)`, e.g. to execute a stored procedure; `text` is
+ * then only what debug output and events show.
  *
  * @internal
  */
 export type QueryRunner = (
   request: sql.Request,
   text: string,
+  run?: (request: sql.Request) => Promise<sql.IResult<Record<string, unknown>>>,
 ) => Promise<sql.IResult<Record<string, unknown>>>;

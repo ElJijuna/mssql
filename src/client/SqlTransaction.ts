@@ -13,6 +13,13 @@ import {
   selectCommand,
   updateCommand,
 } from './commands';
+import {
+  type ExecOptions,
+  type ExecOutput,
+  type ExecOutputValues,
+  type ExecResult,
+  execCommand,
+} from './exec';
 import type { MergeOptions } from './merge';
 import type { FindOneOptions, SelectOptions } from './select';
 import type { SqlWhere } from './statements';
@@ -140,6 +147,20 @@ export class SqlTransaction {
   /** Transaction version of {@link SqlClient.delete}. */
   public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
     return this.enqueue(async () => deleteCommand(this.context, table, where, options));
+  }
+
+  /** Transaction version of {@link SqlClient.exec}. */
+  public async exec<
+    TRow extends object = SqlRow,
+    TOutput extends ExecOutput = Record<string, never>,
+  >(
+    procedure: string,
+    params: SqlRow = {},
+    options: ExecOptions<TOutput> = {},
+  ): Promise<ExecResult<TRow, ExecOutputValues<TOutput>>> {
+    return this.enqueue(async () =>
+      execCommand<TRow, TOutput>(this.context, procedure, params, options),
+    );
   }
 
   /**

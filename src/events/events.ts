@@ -11,7 +11,8 @@ export type SqlOperation =
   | 'insertMany'
   | 'merge'
   | 'update'
-  | 'delete';
+  | 'delete'
+  | 'exec';
 
 /**
  * A query about to be sent.

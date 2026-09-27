@@ -637,4 +637,125 @@ describe('SqlClient', () => {
       );
     });
   });
+
+  describe('exec', () => {
+    const procedureResult = {
+      recordsets: [[{ id: 1 }, { id: 2 }], [{ count: 2 }]],
+      recordset: [{ id: 1 }, { id: 2 }],
+      output: { total: 2 },
+      returnValue: 0,
+      rowsAffected: [2, 1],
+    };
+    const realRequest = (): { execRequest: sql.Request; execute: jest.Mock } => {
+      const execRequest = new sql.Request();
+      const execute = jest.fn().mockResolvedValue(procedureResult);
+
+      Object.assign(execRequest, { execute });
+      pool.request.mockReturnValue(execRequest);
+
+      return { execRequest, execute };
+    };
+
+    it('binds inputs and outputs and maps the procedure result', async () => {
+      const { execRequest, execute } = realRequest();
+      const status = t.nvarchar('open', 20);
+      const result = await new SqlClient(config).exec<
+        { id: number },
+        { total: ReturnType<typeof t.int> }
+      >('dbo.GetOrders', { customerId: 7, '@status': status }, { output: { total: t.int(null) } });
+
+      expect(execute).toHaveBeenCalledWith('dbo.GetOrders');
+      expect(execRequest.parameters.customerId).toMatchObject({ io: 1, value: 7 });
+      expect(execRequest.parameters.status).toMatchObject({ io: 1, value: 'open', length: 20 });
+      expect(execRequest.parameters.total).toMatchObject({ io: 2, value: null, type: sql.Int });
+      expect(result).toEqual({
+        rows: [{ id: 1 }, { id: 2 }],
+        recordsets: procedureResult.recordsets,
+        output: { total: 2 },
+        returnValue: 0,
+        rowsAffected: [2, 1],
+      });
+    });
+
+    it('types output values from the builders', async () => {
+      realRequest();
+
+      const { output } = await new SqlClient(config).exec(
+        'dbo.Stats',
+        {},
+        {
+          output: { total: t.int(null), label: t.nvarchar(null, 50) },
+        },
+      );
+      const { total } = output;
+      const { label } = output;
+
+      // @ts-expect-error unknown output parameter
+      expect(output.missing).toBeUndefined();
+      expect([total, label]).toEqual([2, undefined]);
+    });
+
+    it('returns empty rows when the procedure returns no result set', async () => {
+      const { execute } = realRequest();
+
+      execute.mockResolvedValue({
+        recordsets: [],
+        output: {},
+        returnValue: 5,
+        rowsAffected: [],
+      });
+
+      await expect(new SqlClient(config).exec('dbo.Cleanup')).resolves.toEqual({
+        rows: [],
+        recordsets: [],
+        output: {},
+        returnValue: 5,
+        rowsAffected: [],
+      });
+    });
+
+    it('prints a runnable EXEC script in debug mode', async () => {
+      realRequest();
+      const logger = jest.fn();
+
+      await new SqlClient(config, { debug: logger }).exec(
+        'dbo.GetOrders',
+        { customerId: 7 },
+        { output: { total: t.int(null) } },
+      );
+
+      expect(logger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'exec',
+          script: [
+            'DECLARE @customerId int = 7;',
+            'DECLARE @total int = NULL;',
+            'EXEC [dbo].[GetOrders] @customerId = @customerId, @total = @total OUTPUT;',
+            'SELECT @total AS [total];',
+          ].join('\n'),
+        }),
+      );
+    });
+
+    it('emits failure when the procedure fails', async () => {
+      const { execute } = realRequest();
+      const error = Object.assign(new Error("Could not find stored procedure 'dbo.Nope'."), {
+        number: 2812,
+      });
+      const failure = jest.fn();
+
+      execute.mockRejectedValue(error);
+
+      const client = new SqlClient(config).on('failure', failure);
+
+      await expect(client.exec('dbo.Nope')).rejects.toBe(error);
+      expect(failure).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'exec', number: 2812 }),
+      );
+    });
+
+    it('rejects an empty procedure name', async () => {
+      await expect(new SqlClient(config).exec(' ')).rejects.toThrow(SqlClientError);
+    });
+  });
 });

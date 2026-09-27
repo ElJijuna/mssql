@@ -20,6 +20,13 @@ import {
   selectCommand,
   updateCommand,
 } from './commands';
+import {
+  type ExecOptions,
+  type ExecOutput,
+  type ExecOutputValues,
+  type ExecResult,
+  execCommand,
+} from './exec';
 import type { MergeOptions } from './merge';
 import { type SqlIsolationLevel, SqlTransaction, type TransactionOptions } from './SqlTransaction';
 import type { FindOneOptions, SelectOptions } from './select';
@@ -102,7 +109,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   ): QueryRunner {
     const logger = resolveLogger(this.options.debug, options.debug);
 
-    return async (request, text) => {
+    return async (request, text, run = async (req) => req.query<Record<string, unknown>>(text)) => {
       const observed =
         logger !== null ||
         this.hasListeners('query') ||
@@ -110,7 +117,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
         this.hasListeners('failure');
 
       if (!observed) {
-        return request.query<Record<string, unknown>>(text);
+        return run(request);
       }
 
       const entry = createDebugEntry(operation, request, text);
@@ -128,7 +135,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
       const start = performance.now();
 
       try {
-        const result = await request.query<Record<string, unknown>>(text);
+        const result = await run(request);
 
         this.emit('success', {
           ...event,
@@ -404,6 +411,36 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    */
   public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
     return deleteCommand(this.context, table, where, options);
+  }
+
+  /**
+   * Executes a stored procedure.
+   *
+   * Input parameters are passed by name (plain values or {@link t} builders); a leading `@` is
+   * optional. OUTPUT parameters go in `options.output` and come back typed in `result.output`.
+   *
+   * @param procedure - Procedure name, optionally schema-qualified (`dbo.GetOrders`).
+   * @param params - Input parameters by name.
+   * @param options - OUTPUT parameters and debug. See {@link ExecOptions}.
+   * @returns Rows of the first result set, every result set, output values and the return value.
+   *
+   * @example
+   * const { rows, output, returnValue } = await client.exec<Order>(
+   *   'dbo.GetCustomerOrders',
+   *   { customerId: 7, status: t.nvarchar('open', 20) },
+   *   { output: { total: t.int(null) } },
+   * );
+   * // rows → Order[], output.total → number | null
+   */
+  public async exec<
+    TRow extends object = SqlRow,
+    TOutput extends ExecOutput = Record<string, never>,
+  >(
+    procedure: string,
+    params: SqlRow = {},
+    options: ExecOptions<TOutput> = {},
+  ): Promise<ExecResult<TRow, ExecOutputValues<TOutput>>> {
+    return execCommand<TRow, TOutput>(this.context, procedure, params, options);
   }
 
   /**

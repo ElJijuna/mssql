@@ -1,4 +1,5 @@
 export type { BatchOnError, BatchOptions, RowAction, RowFailure } from './client/batch';
+export type { ExecOptions, ExecOutput, ExecOutputValues, ExecResult } from './client/exec';
 export type { MergeOptions } from './client/merge';
 export type { SqlClientOptions } from './client/SqlClient';
 export { SqlClient } from './client/SqlClient';
