@@ -10,6 +10,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Typed parameters](#typed-parameters)
 - [Error handling](#error-handling)
 - [Debug mode](#debug-mode)
+- [Events](#events)
 
 ## Install
 
@@ -247,6 +248,42 @@ const client = new SqlClient(config, {
 > Debug output includes parameter **values**. Keep it off in production and away from logs that may contain passwords or personal data.
 
 Queries you run directly on the raw pool (`client.connect()` → `pool.request().query(...)`) are not logged; use `mssql`'s own `DEBUG=mssql:*` for those.
+
+## Events
+
+`SqlClient` is an event emitter. Subscribe with `on`, `once` and `off` (chainable) to observe everything the helpers do — for logging, metrics or alerts:
+
+```ts
+client
+  .on('success', ({ operation, durationMs }) => metrics.timing(`db.${operation}`, durationMs))
+  .on('failure', ({ operation, sql, number, error }) => logger.error({ operation, sql, number, error }))
+  .on('rowFailure', ({ operation, index, number, message }) => logger.warn({ operation, index, number, message }))
+  .on('connectFailure', ({ error }) => alert('SQL Server unreachable', error));
+```
+
+| Event | When | Payload |
+| --- | --- | --- |
+| `connect` | Pool opened | `durationMs` |
+| `connectFailure` | Pool failed to open | `durationMs`, `error` |
+| `close` | Pool closed | `{}` |
+| `query` | A query is about to be sent | `id`, `operation`, `sql`, `params` |
+| `success` | A query completed | `id`, `operation`, `sql`, `params`, `durationMs`, `rowsAffected` |
+| `failure` | A query failed (the method still throws) | `id`, `operation`, `sql`, `params`, `durationMs`, `error`, `number` |
+| `rowFailure` | A row of `insertMany` / `merge` failed, in both `onError` modes | `operation`, `index`, `row`, `number`, `message` |
+
+- `id` correlates the `query`, `success` and `failure` of the same execution.
+- A batch query can emit `success` while some of its rows emitted `rowFailure` (`onError: 'continue'`).
+- A listener that throws never breaks the query: the error is caught and printed with `console.error`.
+- Unsubscribe with `off(event, listener)`, `off(event)` (all listeners), or an `AbortSignal`:
+
+```ts
+const controller = new AbortController();
+
+client.on('failure', report, { signal: controller.signal });
+controller.abort(); // unsubscribed
+```
+
+Event payloads include parameter values (`params`, `row`); treat them like debug output when shipping them to logs.
 
 ## Scripts
 

@@ -1,12 +1,6 @@
 import sql from 'mssql';
 import { bindInput, t } from '../types/SqlParam';
-import {
-  consoleLogger,
-  createDebugEntry,
-  createQueryRunner,
-  resolveLogger,
-  toLiteral,
-} from './debug';
+import { consoleLogger, createDebugEntry, resolveLogger, toLiteral } from './debug';
 
 const requestWith = (values: Record<string, unknown>): sql.Request => {
   const request = new sql.Request();
@@ -96,30 +90,6 @@ describe('resolveLogger', () => {
     expect(resolveLogger(true, false)).toBeNull();
     expect(resolveLogger(false, true)).toBe(consoleLogger);
     expect(resolveLogger(true, custom)).toBe(custom);
-  });
-});
-
-describe('createQueryRunner', () => {
-  it('logs before running the query', async () => {
-    const logger = jest.fn();
-    const request = requestWith({ p0: 1 });
-    const query = jest.spyOn(request, 'query').mockResolvedValue({} as never);
-
-    await createQueryRunner('update', logger)(request, 'SELECT @p0;');
-
-    expect(logger).toHaveBeenCalledWith(
-      expect.objectContaining({ operation: 'update', sql: 'SELECT @p0;' }),
-    );
-    expect(logger.mock.invocationCallOrder[0]).toBeLessThan(query.mock.invocationCallOrder[0] ?? 0);
-  });
-
-  it('only runs the query when debug is off', async () => {
-    const request = new sql.Request();
-    const query = jest.spyOn(request, 'query').mockResolvedValue({} as never);
-
-    await createQueryRunner('update', null)(request, 'SELECT 1;');
-
-    expect(query).toHaveBeenCalledWith('SELECT 1;');
   });
 });
 

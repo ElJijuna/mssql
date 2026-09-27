@@ -17,6 +17,18 @@ export type {
 } from './debug/debug';
 export { BatchRowError } from './errors/BatchRowError';
 export { SqlClientError } from './errors/SqlClientError';
+export type {
+  SqlClientEvents,
+  SqlConnectEvent,
+  SqlConnectFailureEvent,
+  SqlFailureEvent,
+  SqlOperation,
+  SqlQueryEvent,
+  SqlRowFailureEvent,
+  SqlSuccessEvent,
+} from './events/events';
+export type { Listener, SubscribeOptions } from './events/TypedEmitter';
+export { TypedEmitter } from './events/TypedEmitter';
 export type { Nullable, SqlLength } from './types/SqlParam';
 export { SqlParam, t } from './types/SqlParam';
 export { quoteIdentifier } from './utils/quoteIdentifier';

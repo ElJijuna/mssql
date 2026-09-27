@@ -163,7 +163,7 @@ export const resolveLogger = (
 };
 
 /**
- * Runs `text` on `request`. Used by the helpers so every query goes through debug logging.
+ * Runs `text` on `request`. Every helper query goes through one, so it can be logged and observed.
  *
  * @internal
  */
@@ -171,16 +171,3 @@ export type QueryRunner = (
   request: sql.Request,
   text: string,
 ) => Promise<sql.IResult<Record<string, unknown>>>;
-
-/**
- * Creates a {@link QueryRunner} that logs each query before sending it.
- *
- * @internal
- */
-export const createQueryRunner =
-  (operation: string, logger: SqlDebugLogger | null): QueryRunner =>
-  async (request, text) => {
-    logger?.(createDebugEntry(operation, request, text));
-
-    return request.query<Record<string, unknown>>(text);
-  };

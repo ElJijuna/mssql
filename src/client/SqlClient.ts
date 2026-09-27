@@ -1,14 +1,26 @@
 import sql from 'mssql';
 import {
-  createQueryRunner,
+  createDebugEntry,
   type QueryOptions,
   type QueryRunner,
   resolveLogger,
   type SqlDebugOption,
 } from '../debug/debug';
+import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
+import type { SqlClientEvents, SqlOperation } from '../events/events';
+import { TypedEmitter } from '../events/TypedEmitter';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
-import { type BatchOptions, executeBatch, type RowAction, type RowFailure, track } from './batch';
+import {
+  type BatchOptions,
+  type BatchOutcome,
+  describeError,
+  type ExecuteBatchParams,
+  executeBatch,
+  type RowAction,
+  type RowFailure,
+  track,
+} from './batch';
 import { buildMergeStatement, type MergeOptions, missingKey, normalizeKeys } from './merge';
 import { bindRow, buildInsertStatement, keyPredicate } from './statements';
 
@@ -71,14 +83,25 @@ export interface MergeResult {
 }
 
 /**
- * Thin wrapper around an `mssql` connection pool that will host the helper methods.
+ * Thin wrapper around an `mssql` connection pool with helper methods.
+ *
+ * It is also an event emitter: subscribe with `on` / `once` / `off` to observe connections,
+ * queries, successes and failures. See {@link SqlClientEvents}.
+ *
+ * @example
+ * client
+ *   .on('success', ({ operation, durationMs }) => metrics.timing(operation, durationMs))
+ *   .on('failure', ({ operation, sql, error }) => logger.error({ operation, sql, error }))
+ *   .on('rowFailure', ({ index, number, message }) => logger.warn({ index, number, message }));
  */
-export class SqlClient {
+export class SqlClient extends TypedEmitter<SqlClientEvents> {
   private readonly config: SqlClientConfig;
   private readonly options: SqlClientOptions;
   private poolPromise: Promise<sql.ConnectionPool> | undefined;
+  private queryId = 0;
 
   public constructor(config: SqlClientConfig, options: SqlClientOptions = {}) {
+    super();
     this.config = config;
     this.options = options;
   }
@@ -92,15 +115,97 @@ export class SqlClient {
     return this.poolPromise;
   }
 
-  private runner(operation: string, options: QueryOptions): QueryRunner {
-    return createQueryRunner(operation, resolveLogger(this.options.debug, options.debug));
+  /**
+   * Creates the function every helper uses to send SQL: prints it when debug is on and emits the
+   * `query`, `success` and `failure` events.
+   */
+  private runner(operation: SqlOperation, options: QueryOptions): QueryRunner {
+    const logger = resolveLogger(this.options.debug, options.debug);
+
+    return async (request, text) => {
+      const observed =
+        logger !== null ||
+        this.hasListeners('query') ||
+        this.hasListeners('success') ||
+        this.hasListeners('failure');
+
+      if (!observed) {
+        return request.query<Record<string, unknown>>(text);
+      }
+
+      const entry = createDebugEntry(operation, request, text);
+      const event = { id: ++this.queryId, operation, sql: entry.sql, params: entry.params };
+
+      logger?.(entry);
+      this.emit('query', event);
+
+      const start = performance.now();
+
+      try {
+        const result = await request.query<Record<string, unknown>>(text);
+
+        this.emit('success', {
+          ...event,
+          durationMs: performance.now() - start,
+          rowsAffected: result.rowsAffected,
+        });
+
+        return result;
+      } catch (error) {
+        this.emit('failure', {
+          ...event,
+          durationMs: performance.now() - start,
+          error,
+          number: describeError(error).number,
+        });
+
+        throw error;
+      }
+    };
+  }
+
+  /**
+   * Runs a batch helper and emits `rowFailure` for every failed row, in both `onError` modes.
+   */
+  private async runBatch(
+    operation: SqlOperation,
+    params: ExecuteBatchParams,
+  ): Promise<BatchOutcome> {
+    try {
+      const outcome = await executeBatch(params);
+
+      for (const failure of outcome.failures) {
+        this.emit('rowFailure', { ...failure, operation });
+      }
+
+      return outcome;
+    } catch (error) {
+      if (error instanceof BatchRowError) {
+        this.emit('rowFailure', {
+          operation,
+          index: error.index,
+          row: error.row,
+          number: error.number,
+          message: error.sqlMessage,
+        });
+      }
+
+      throw error;
+    }
   }
 
   private async openPool(): Promise<sql.ConnectionPool> {
+    const start = performance.now();
+
     try {
-      return await new sql.ConnectionPool(this.config).connect();
+      const pool = await new sql.ConnectionPool(this.config).connect();
+
+      this.emit('connect', { durationMs: performance.now() - start });
+
+      return pool;
     } catch (error) {
       this.poolPromise = undefined;
+      this.emit('connectFailure', { durationMs: performance.now() - start, error });
 
       throw new SqlClientError('Failed to connect to SQL Server', { cause: error });
     }
@@ -177,7 +282,7 @@ export class SqlClient {
     }
 
     const target = quoteIdentifier(table);
-    const { outcomes, failures } = await executeBatch({
+    const { outcomes, failures } = await this.runBatch('insertMany', {
       pool: await this.connect(),
       rows,
       options,
@@ -240,7 +345,7 @@ export class SqlClient {
       return result;
     }
 
-    const { outcomes, failures } = await executeBatch({
+    const { outcomes, failures } = await this.runBatch('merge', {
       pool: await this.connect(),
       rows,
       options,
@@ -339,6 +444,7 @@ export class SqlClient {
 
     this.poolPromise = undefined;
     await pool.close();
+    this.emit('close', {});
   }
 }
 

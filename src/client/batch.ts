@@ -183,7 +183,12 @@ export const buildBatch = (
   ].join('\n');
 };
 
-const describeError = (error: unknown): { number: number | null; message: string } => {
+/**
+ * Extracts the SQL Server error number (if any) and message from an error.
+ *
+ * @internal
+ */
+export const describeError = (error: unknown): { number: number | null; message: string } => {
   const number = (error as { number?: unknown } | null)?.number;
 
   return {
@@ -191,6 +196,7 @@ const describeError = (error: unknown): { number: number | null; message: string
     message: error instanceof Error ? error.message : String(error),
   };
 };
+
 const runChunk = async (
   query: QueryRunner,
   request: sql.Request,

@@ -442,4 +442,120 @@ describe('SqlClient', () => {
       ]);
     });
   });
+
+  describe('events', () => {
+    it('emits connect and close', async () => {
+      const client = new SqlClient(config);
+      const connect = jest.fn();
+      const close = jest.fn();
+
+      client.on('connect', connect).on('close', close);
+      await client.connect();
+      await client.close();
+
+      expect(connect).toHaveBeenCalledWith({ durationMs: expect.any(Number) });
+      expect(close).toHaveBeenCalledWith({});
+    });
+
+    it('emits connectFailure', async () => {
+      const cause = new Error('Login failed');
+      const listener = jest.fn();
+
+      pool.connect.mockRejectedValueOnce(cause);
+      const client = new SqlClient(config).on('connectFailure', listener);
+
+      await expect(client.connect()).rejects.toThrow(SqlClientError);
+      expect(listener).toHaveBeenCalledWith({ durationMs: expect.any(Number), error: cause });
+    });
+
+    it('emits query then success with a shared id', async () => {
+      const client = new SqlClient(config);
+      const query = jest.fn();
+      const success = jest.fn();
+
+      request.query.mockResolvedValue({ rowsAffected: [2] });
+      client.on('query', query).on('success', success);
+      await client.delete('Users', { active: false });
+
+      const sent = {
+        id: 1,
+        operation: 'delete',
+        sql: 'DELETE FROM [Users] WHERE [active] = @p0;',
+        params: [],
+      };
+
+      expect(query).toHaveBeenCalledWith(sent);
+      expect(success).toHaveBeenCalledWith({
+        ...sent,
+        durationMs: expect.any(Number),
+        rowsAffected: [2],
+      });
+    });
+
+    it('emits failure with the SQL Server error number and rethrows', async () => {
+      const client = new SqlClient(config);
+      const failure = jest.fn();
+      const error = Object.assign(
+        new Error('The DELETE statement conflicted with the REFERENCE constraint'),
+        {
+          number: 547,
+        },
+      );
+
+      request.query.mockRejectedValue(error);
+      client.on('failure', failure);
+
+      await expect(client.delete('Users', { id: 1 })).rejects.toBe(error);
+      expect(failure).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'delete', error, number: 547 }),
+      );
+    });
+
+    it('emits rowFailure for each failed row in continue mode', async () => {
+      const client = new SqlClient(config);
+      const rowFailure = jest.fn();
+
+      request.query.mockResolvedValue(
+        batchResult(
+          [{ i: 1, number: 2627, message: 'Violation of UNIQUE KEY' }],
+          [{ i: 0, action: 'inserted', id: 1 }],
+        ),
+      );
+      client.on('rowFailure', rowFailure);
+      await client.insertMany('Users', [{ name: 'Ana' }, { name: 'Ana' }], { onError: 'continue' });
+
+      expect(rowFailure).toHaveBeenCalledWith({
+        operation: 'insertMany',
+        index: 1,
+        row: { name: 'Ana' },
+        number: 2627,
+        message: 'Violation of UNIQUE KEY',
+      });
+    });
+
+    it('emits rowFailure before throwing in rollback mode', async () => {
+      const client = new SqlClient(config);
+      const rowFailure = jest.fn();
+
+      client.on('rowFailure', rowFailure);
+
+      await expect(client.merge('Users', [{ name: 'x' }], { on: 'email' })).rejects.toThrow(
+        BatchRowError,
+      );
+      expect(rowFailure).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'merge',
+          index: 0,
+          message: 'Missing key column(s): email',
+        }),
+      );
+    });
+
+    it('does not build debug entries when nobody is listening', async () => {
+      request.query.mockResolvedValue({ rowsAffected: [1] });
+      delete (request as Partial<typeof request>).parameters;
+
+      await expect(new SqlClient(config).delete('Users', { id: 1 })).resolves.toBe(1);
+    });
+  });
 });
