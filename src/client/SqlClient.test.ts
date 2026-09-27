@@ -1,11 +1,12 @@
 import sql from 'mssql';
 import { SqlClientError } from '../errors/SqlClientError';
+import { t } from '../types/SqlParam';
 import { SqlClient } from './SqlClient';
 
 jest.mock('mssql', () => {
   const ConnectionPool = jest.fn();
 
-  return { __esModule: true, default: { ConnectionPool } };
+  return { __esModule: true, default: { ...jest.requireActual('mssql'), ConnectionPool } };
 });
 
 const ConnectionPoolMock = sql.ConnectionPool as unknown as jest.Mock;
@@ -75,6 +76,15 @@ describe('SqlClient', () => {
       expect(request.query).toHaveBeenCalledWith(
         'INSERT INTO [dbo].[Users] ([name], [e-mail]) VALUES (@p0, @p1); SELECT SCOPE_IDENTITY() AS id;',
       );
+    });
+
+    it('binds typed values with their explicit type', async () => {
+      const name = t.nvarchar('Ana', 100);
+
+      await new SqlClient(config).insert('Users', { name, age: 30 });
+
+      expect(request.input).toHaveBeenNthCalledWith(1, 'p0', name.type, 'Ana');
+      expect(request.input).toHaveBeenNthCalledWith(2, 'p1', 30);
     });
 
     it('inserts default values when the row is empty', async () => {

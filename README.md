@@ -47,6 +47,33 @@ const id = await client.insert('dbo.Users', { name: 'Ana', email: 'ana@example.c
 
 Values are sent as parameters and table/column names are bracket-quoted, so user input is never concatenated into the SQL.
 
+### Typed parameters
+
+Plain values are typed by `mssql` from the JavaScript value. Use the `t` builders — named after the T-SQL types — to set the exact type and its dimensions:
+
+```ts
+import { t } from '@pilmee/mssql';
+
+await client.insert('dbo.Products', {
+  name: t.nvarchar('Keyboard', 100),       // nvarchar(100)
+  description: t.nvarchar(text, 'max'),    // nvarchar(max)
+  price: t.decimal(49.99, 10, 2),          // decimal(10, 2)
+  sku: t.char('KB-001', 6),                // char(6)
+  createdAt: t.datetime2(new Date(), 3),   // datetime2(3)
+  externalId: t.uniqueidentifier(uuid),
+  stock: 10,                               // inferred
+});
+```
+
+| Kind | Builders |
+| --- | --- |
+| Integers / exact | `bit`, `tinyint`, `smallint`, `int`, `bigint`, `decimal(v, p, s)`, `numeric(v, p, s)`, `money`, `smallmoney` |
+| Approximate | `float`, `real` |
+| Strings | `char(v, n)`, `nchar(v, n)`, `varchar(v, n \| 'max')`, `nvarchar(v, n \| 'max')` |
+| Binary | `binary(v, n)`, `varbinary(v, n \| 'max')` |
+| Date / time | `date`, `time(v, scale)`, `datetime`, `datetime2(v, scale)`, `datetimeoffset(v, scale)`, `smalldatetime` |
+| Other | `uniqueidentifier`, `xml` |
+
 ## Scripts
 
 | Script | Description |

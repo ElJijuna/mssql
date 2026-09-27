@@ -1,5 +1,6 @@
 import sql from 'mssql';
 import { SqlClientError } from '../errors/SqlClientError';
+import { bindInput } from '../types/SqlParam';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
 
 /**
@@ -9,6 +10,7 @@ export type SqlClientConfig = sql.config;
 
 /**
  * Column/value pairs for a single row. Keys are column names; values are sent as parameters.
+ * Use the {@link t} builders to set an explicit type, otherwise mssql infers it from the value.
  */
 export type SqlRow = Record<string, unknown>;
 
@@ -54,7 +56,10 @@ export class SqlClient {
    * @returns The generated identity, or `null` when the table has no identity column.
    *
    * @example
-   * const id = await client.insert('dbo.Users', { name: 'Ana', email: 'ana@example.com' });
+   * const id = await client.insert('dbo.Users', {
+   *   name: t.nvarchar('Ana', 100),
+   *   email: 'ana@example.com',
+   * });
    */
   public async insert(table: string, row: SqlRow): Promise<number | null> {
     const pool = await this.connect();
@@ -63,7 +68,7 @@ export class SqlClient {
     const target = quoteIdentifier(table);
 
     columns.forEach((column, index) => {
-      request.input(`p${index}`, row[column]);
+      bindInput(request, `p${index}`, row[column]);
     });
 
     const insert =
