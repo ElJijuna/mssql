@@ -1,0 +1,12 @@
+{
+    "$schema": "https://typedoc.org/schema.json",
+    "extends": ["super-configs/typedoc"],
+    "entryPoints": ["src/index.ts"],
+    "out": "docs",
+    "name": "@pilmee/mssql",
+    "readme": "README.md",
+    "navigationLinks": {
+        "GitHub": "https://github.com/ElJijuna/mssql",
+        "npm": "https://www.npmjs.com/package/@pilmee/mssql"
+    }
+}
