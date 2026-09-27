@@ -11,6 +11,7 @@ import {
   type BatchOutcome,
   type ExecuteBatchParams,
   executeBatch,
+  type RowRetry,
   track,
 } from './batch';
 import { buildMergeStatement, type MergeOptions, missingKey, normalizeKeys } from './merge';
@@ -34,6 +35,8 @@ export interface CommandContext {
   rowFailure: (event: SqlRowFailureEvent) => void;
   /** Loads a SQL file (cached, relative to `sqlDir`). */
   sqlFile: (file: string) => Promise<SqlFile>;
+  /** Row-level retries for `'continue'` batches; set per call by the client, never in a transaction. */
+  rowRetry?: RowRetry;
 }
 
 const requireWhere = (operation: string, where: SqlWhere): void => {
@@ -47,7 +50,7 @@ const requireWhere = (operation: string, where: SqlWhere): void => {
 const runBatch = async (
   ctx: CommandContext,
   operation: SqlOperation,
-  params: Omit<ExecuteBatchParams, 'connection' | 'query'>,
+  params: Omit<ExecuteBatchParams, 'connection' | 'query' | 'rowRetry'>,
 ): Promise<BatchOutcome> => {
   try {
     const query = ctx.runner(operation, params.options);
@@ -55,6 +58,7 @@ const runBatch = async (
       ...params,
       connection: await ctx.connection(),
       query,
+      rowRetry: params.options.onError === 'continue' ? ctx.rowRetry : undefined,
     });
 
     for (const failure of outcome.failures) {

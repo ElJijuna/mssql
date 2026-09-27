@@ -10,7 +10,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
 - [Raw SQL and .sql files](#raw-sql-and-sql-files) · [Stored procedures](#stored-procedures) · [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
-- [Cancellation and timeouts](#cancellation-and-timeouts)
+- [Cancellation and timeouts](#cancellation-and-timeouts) · [Retries](#retries)
 - [Error handling](#error-handling)
 - [Debug mode](#debug-mode)
 - [Events](#events)
@@ -493,12 +493,69 @@ await client.transaction(
 );
 ```
 
+## Retries
+
+Transient errors — deadlocks (`1205`), Azure SQL failovers (`40613`, `40197`, `4060`…), a busy service (`40501`), resource limits, In-Memory OLTP conflicts and failed connections — are retried automatically with exponential backoff and jitter. The full list is exported as `TRANSIENT_ERROR_NUMBERS`.
+
+Retrying is only done where running the work again is safe:
+
+| Call | Retried by default | What is retried |
+| --- | --- | --- |
+| `select`, `findOne`, `insert`, `update`, `delete` | yes | the call (a single statement: a deadlock already rolled it back) |
+| `insertMany` / `merge` with `onError: 'rollback'` | yes | the whole call (all or nothing) |
+| `insertMany` / `merge` with `onError: 'continue'` | yes | only the rows that failed with a transient error; rows already saved are never repeated |
+| `exec`, `query`, `queryFile` | **no**, pass `retry: true` | the call — only opt in when the SQL is safe to run twice |
+| `transaction(fn)` | **no**, pass `retry: true` | the whole transaction (`fn` runs again from scratch) |
+| operations inside `tx` | never | a deadlock kills the whole transaction; retry the transaction instead |
+
+Failed connections (`SqlConnectionError`) are retried by every call that retries, since nothing was executed.
+
+```ts
+// Client defaults (shown with their default values)
+const client = new SqlClient(config, {
+  retry: { attempts: 3, delay: 100, maxDelay: 2_000 },
+});
+
+// Per call
+await client.select('dbo.Users', {}, { retry: false });                        // never retry this one
+await client.exec('dbo.RecalculateTotals', { day }, { retry: true });            // safe to repeat
+await client.queryFile('reports/sales-per-day', params, { retry: { attempts: 5 } });
+
+// A transaction that may lose a deadlock: fn runs again from the start
+await client.transaction(async (tx) => {
+  await tx.update('dbo.Accounts', { balance: from.balance - amount }, { id: from.id });
+  await tx.update('dbo.Accounts', { balance: to.balance + amount }, { id: to.id });
+}, { retry: true });
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `attempts` | `3` | Retries after the first try. `0` disables retrying. |
+| `delay` | `100` | Base wait in ms, doubled on each retry (with jitter). |
+| `maxDelay` | `2000` | Maximum wait in ms. |
+| `errorNumbers` | `TRANSIENT_ERROR_NUMBERS` | Error numbers to retry. |
+| `shouldRetry` | — | `(error, attempt) => boolean`, replaces `errorNumbers` for custom rules. |
+
+- `retry: false` on the client turns it off everywhere; a call's `retry` always wins over the client's.
+- `timeout` and `signal` cover every attempt **and** the waits between them; cancellations are never retried.
+- With `transaction(fn, { retry: true })`, keep side effects outside the database (emails, HTTP calls, queues) out of `fn` — they would run again.
+- Every retry emits a `retry` event, handy for metrics:
+
+  ```ts
+  client.on('retry', ({ operation, attempt, number, delayMs }) =>
+    logger.warn(`${operation} retry #${attempt} after error ${number} in ${delayMs} ms`),
+  );
+  ```
+
+Mid-query connection drops (`ESOCKET`, `ECONNRESET`) are not retried by default: the statement may have run before the connection broke. Use `shouldRetry` if your writes are idempotent.
+
 ## Error handling
 
 | Error | When |
 | --- | --- |
-| `SqlClientError` | Base class. Connection failures, invalid identifiers, empty `where`, unexpected batch errors (original error in `cause`). |
+| `SqlClientError` | Base class of every error below. Also thrown for invalid identifiers, empty `where`, missing parameters and unexpected batch errors (original error in `cause`). |
 | `BatchRowError` | `insertMany` / `merge` in `'rollback'` mode when a row fails. Has `index`, `row`, `number`, `sqlMessage`. Nothing was saved. |
+| `SqlConnectionError` | The pool couldn't connect (subclass of `SqlClientError`). Nothing ran; retried automatically. |
 | `SqlAbortError` | The call's `signal` aborted or its `timeout` passed; the query was cancelled. Has `reason` (`'abort'` / `'timeout'`) and `operation`; `cause` is the signal's reason. |
 
 In `'continue'` mode batch helpers don't throw; each entry in `failures` has `index`, `row`, `number` and `message`. `number` is the SQL Server error number (e.g. `2627` unique key, `547` foreign key, `515` NOT NULL, `2628` truncation), or `null` when the error came from the driver or from validation.
@@ -578,6 +635,7 @@ client
 | `transactionBegin` | A transaction started | `transactionId` |
 | `transactionCommit` | A transaction committed | `transactionId`, `durationMs` |
 | `transactionRollback` | A transaction rolled back | `transactionId`, `durationMs`, `error` |
+| `retry` | A transient error is about to be retried | `operation`, `attempt`, `delayMs`, `error`, `number`, `rows` (continue-mode batches) |
 
 - `id` correlates the `query`, `success` and `failure` of the same execution.
 - `transactionId` on `query` / `success` / `failure` links a query to its transaction (`null` outside one).
@@ -618,6 +676,8 @@ npm run db:up             # first run downloads the image (~1.5 GB); on Apple Si
 npm run test:integration
 npm run db:down
 ```
+
+A real deadlock is provoked to check that transaction retries apply each transaction exactly once.
 
 They use the `pilmee_mssql_test` database (created automatically). Point them at another server with `MSSQL_HOST`, `MSSQL_PORT`, `MSSQL_USER`, `MSSQL_PASSWORD` and `MSSQL_DATABASE`. CI runs them on every pull request.
 

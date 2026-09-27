@@ -103,6 +103,24 @@ export interface SqlTransactionRollbackEvent extends SqlTransactionCommitEvent {
 }
 
 /**
+ * A call (or some rows of a batch) is about to be retried after a transient error.
+ */
+export interface SqlRetryEvent {
+  /** Helper being retried, or `transaction`. */
+  operation: SqlOperation | 'transaction';
+  /** The attempt that just failed (1 = the first try). */
+  attempt: number;
+  /** Wait before the next attempt, in milliseconds. */
+  delayMs: number;
+  /** The error (for row retries, the first failed row). */
+  error: unknown;
+  /** SQL Server error number, or `null` (e.g. connection failures). */
+  number: number | null;
+  /** For `'continue'` batches: the input indexes of the rows being retried. */
+  rows?: number[];
+}
+
+/**
  * Events emitted by {@link SqlClient}. Subscribe with `client.on(event, listener)`.
  */
 export interface SqlClientEvents {
@@ -126,4 +144,6 @@ export interface SqlClientEvents {
   transactionCommit: SqlTransactionCommitEvent;
   /** A transaction rolled back. */
   transactionRollback: SqlTransactionRollbackEvent;
+  /** A transient error is about to be retried. */
+  retry: SqlRetryEvent;
 }

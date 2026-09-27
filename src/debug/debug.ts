@@ -1,4 +1,5 @@
 import type sql from 'mssql';
+import type { RetryOption } from '../client/retry';
 
 /**
  * A bound parameter as shown in a debug entry.
@@ -60,6 +61,12 @@ export interface QueryOptions {
    * interrupted (the pool's `connectionTimeout` bounds it), but nothing is sent once the time is up.
    */
   timeout?: number;
+  /**
+   * Retry transient errors (deadlocks, Azure SQL failovers…) for this call. Overrides the
+   * client-level `retry`. `exec`, `query` and `queryFile` only retry when this is set, because
+   * their SQL may not be safe to run twice.
+   */
+  retry?: RetryOption;
 }
 
 type RequestParameter = sql.IRequestParameters[string];

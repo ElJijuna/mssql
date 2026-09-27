@@ -6,13 +6,13 @@ import {
   resolveLogger,
   type SqlDebugOption,
 } from '../debug/debug';
-import { SqlClientError } from '../errors/SqlClientError';
+import { SqlConnectionError } from '../errors/SqlConnectionError';
 import type { SqlClientEvents, SqlOperation } from '../events/events';
 import { TypedEmitter } from '../events/TypedEmitter';
 import { SqlFileLoader } from '../files/SqlFileLoader';
 import type { SqlParams } from '../sql/bindNamed';
 import { type BatchOptions, describeError, poolConnection, rollbackQuietly } from './batch';
-import { type CallScope, createCallGuard, createScope } from './cancellation';
+import { type CallScope, createCallGuard, createScope, pause } from './cancellation';
 import {
   type CommandContext,
   deleteCommand,
@@ -32,6 +32,14 @@ import {
 } from './exec';
 import type { MergeOptions } from './merge';
 import { type QueryResult, queryCommand, queryFileCommand, type RawQueryOptions } from './query';
+import {
+  errorNumber,
+  isRetryable,
+  type RetryOption,
+  type RetryPolicy,
+  resolveRetry,
+  retryDelay,
+} from './retry';
 import { type SqlIsolationLevel, SqlTransaction, type TransactionOptions } from './SqlTransaction';
 import type { FindOneOptions, SelectOptions } from './select';
 import type { SqlWhere } from './statements';
@@ -62,6 +70,13 @@ export interface SqlClientOptions {
    * to pick up edits without restarting.
    */
   cacheSqlFiles?: boolean;
+  /**
+   * Retry transient errors (deadlocks, Azure SQL failovers, busy service…) with exponential
+   * backoff. On by default for `select`, `findOne`, `insert`, `update`, `delete`, `insertMany` and
+   * `merge`; `false` turns it off. `exec`, `query`, `queryFile` and `transaction` only retry when
+   * the call asks for it. See {@link RetryOptions}.
+   */
+  retry?: RetryOption;
 }
 
 const ISOLATION_LEVELS: Record<SqlIsolationLevel, sql.IIsolationLevel> = {
@@ -183,6 +198,92 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     };
   }
 
+  /**
+   * Runs a helper, retrying transient errors according to the client and call `retry` options.
+   * `signal` and `timeout` span every attempt, including the waits between them.
+   */
+  private async call<TResult, TOptions extends QueryOptions>(
+    operation: SqlOperation,
+    options: TOptions,
+    run: (ctx: CommandContext, options: TOptions) => Promise<TResult>,
+    { retryByDefault = true, connectionOnly = false } = {},
+  ): Promise<TResult> {
+    const policy = resolveRetry(this.options.retry, options.retry, retryByDefault);
+
+    if (!policy) {
+      return run(this.context, options);
+    }
+
+    const { signal, timeout, ...rest } = options;
+    const scope = createScope(operation, { signal, timeout });
+    const ctx: CommandContext = {
+      ...this.context,
+      runner: (op, queryOptions) => this.runner(op, queryOptions, null, scope),
+      rowRetry: {
+        attempts: policy.attempts,
+        isTransient: (failure, attempt) => isRetryable(failure, attempt, policy),
+        wait: async (attempt, failures) => {
+          const [first] = failures;
+
+          await this.waitToRetry(
+            operation,
+            attempt,
+            policy,
+            scope,
+            first,
+            failures.map(({ index }) => index),
+          );
+        },
+      },
+    };
+
+    // The scope enforces signal/timeout across attempts, so the attempts don't get their own clock.
+    return this.retrying(operation, policy, scope, connectionOnly, async () =>
+      run(ctx, rest as TOptions),
+    );
+  }
+
+  private async retrying<TResult>(
+    operation: SqlOperation | 'transaction',
+    policy: RetryPolicy,
+    scope: CallScope,
+    connectionOnly: boolean,
+    attemptOnce: () => Promise<TResult>,
+  ): Promise<TResult> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await attemptOnce();
+      } catch (error) {
+        if (attempt > policy.attempts || !isRetryable(error, attempt, policy, connectionOnly)) {
+          throw error;
+        }
+
+        await this.waitToRetry(operation, attempt, policy, scope, error);
+      }
+    }
+  }
+
+  private async waitToRetry(
+    operation: SqlOperation | 'transaction',
+    attempt: number,
+    policy: RetryPolicy,
+    scope: CallScope,
+    error: unknown,
+    rows?: number[],
+  ): Promise<void> {
+    const delayMs = retryDelay(attempt, policy);
+
+    this.emit('retry', {
+      operation,
+      attempt,
+      delayMs,
+      error,
+      number: errorNumber(error),
+      ...(rows ? { rows } : {}),
+    });
+    await pause(delayMs, scope);
+  }
+
   private async openPool(): Promise<sql.ConnectionPool> {
     const start = performance.now();
 
@@ -196,7 +297,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
       this.poolPromise = undefined;
       this.emit('connectFailure', { durationMs: performance.now() - start, error });
 
-      throw new SqlClientError('Failed to connect to SQL Server', { cause: error });
+      throw new SqlConnectionError('Failed to connect to SQL Server', { cause: error });
     }
   }
 
@@ -225,6 +326,25 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     options: TransactionOptions = {},
   ): Promise<TResult> {
     const scope = createScope('transaction', options);
+    const policy = resolveRetry(this.options.retry, options.retry, false);
+
+    if (!policy) {
+      return this.runTransaction(work, options, scope);
+    }
+
+    return this.retrying('transaction', policy, scope, false, async () =>
+      this.runTransaction(work, options, scope),
+    );
+  }
+
+  private async runTransaction<TResult>(
+    work: (tx: SqlTransaction) => Promise<TResult>,
+    options: TransactionOptions,
+    scope: CallScope,
+  ): Promise<TResult> {
+    // Checks the signal and deadline before (re)starting.
+    createCallGuard('transaction', {}, scope);
+
     const pool = await this.connect();
     const transaction = pool.transaction();
     const transactionId = ++this.transactionId;
@@ -294,7 +414,9 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     where: SqlWhere = {},
     options: SelectOptions = {},
   ): Promise<TRow[]> {
-    return selectCommand<TRow>(this.context, table, where, options);
+    return this.call('select', options, async (ctx, o) =>
+      selectCommand<TRow>(ctx, table, where, o),
+    );
   }
 
   /**
@@ -314,7 +436,9 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     where: SqlWhere = {},
     options: FindOneOptions = {},
   ): Promise<TRow | null> {
-    return findOneCommand<TRow>(this.context, table, where, options);
+    return this.call('findOne', options, async (ctx, o) =>
+      findOneCommand<TRow>(ctx, table, where, o),
+    );
   }
 
   /**
@@ -340,7 +464,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     row: SqlRow,
     options: QueryOptions = {},
   ): Promise<number | null> {
-    return insertCommand(this.context, table, row, options);
+    return this.call('insert', options, async (ctx, o) => insertCommand(ctx, table, row, o));
   }
 
   /**
@@ -372,7 +496,14 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     rows: SqlRow[],
     options: BatchOptions = {},
   ): Promise<InsertManyResult> {
-    return insertManyCommand(this.context, table, rows, options);
+    return this.call(
+      'insertMany',
+      options,
+      async (ctx, o) => insertManyCommand(ctx, table, rows, o),
+      {
+        connectionOnly: options.onError === 'continue',
+      },
+    );
   }
 
   /**
@@ -398,7 +529,9 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * // actions → ['updated', 'inserted']
    */
   public async merge(table: string, rows: SqlRow[], options: MergeOptions): Promise<MergeResult> {
-    return mergeCommand(this.context, table, rows, options);
+    return this.call('merge', options, async (ctx, o) => mergeCommand(ctx, table, rows, o), {
+      connectionOnly: options.onError === 'continue',
+    });
   }
 
   /**
@@ -422,7 +555,9 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     where: SqlWhere,
     options: QueryOptions = {},
   ): Promise<number> {
-    return updateCommand(this.context, table, values, where, options);
+    return this.call('update', options, async (ctx, o) =>
+      updateCommand(ctx, table, values, where, o),
+    );
   }
 
   /**
@@ -440,7 +575,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * await client.delete('dbo.Sessions', { userId: 42 }); // → 3
    */
   public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
-    return deleteCommand(this.context, table, where, options);
+    return this.call('delete', options, async (ctx, o) => deleteCommand(ctx, table, where, o));
   }
 
   /**
@@ -467,7 +602,14 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     params: SqlRow = {},
     options: ExecOptions<TOutput> = {},
   ): Promise<ExecResult<TRow, ExecOutputValues<TOutput>>> {
-    return execCommand<TRow, TOutput>(this.context, procedure, params, options);
+    return this.call(
+      'exec',
+      options,
+      async (ctx, o) => execCommand<TRow, TOutput>(ctx, procedure, params, o),
+      {
+        retryByDefault: false,
+      },
+    );
   }
 
   /**
@@ -495,7 +637,9 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     params: SqlParams = {},
     options: RawQueryOptions = {},
   ): Promise<QueryResult<TRow>> {
-    return queryCommand<TRow>(this.context, sql, params, options);
+    return this.call('query', options, async (ctx, o) => queryCommand<TRow>(ctx, sql, params, o), {
+      retryByDefault: false,
+    });
   }
 
   /**
@@ -525,7 +669,14 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     params: SqlParams = {},
     options: RawQueryOptions = {},
   ): Promise<QueryResult<TRow>> {
-    return queryFileCommand<TRow>(this.context, file, params, options);
+    return this.call(
+      'queryFile',
+      options,
+      async (ctx, o) => queryFileCommand<TRow>(ctx, file, params, o),
+      {
+        retryByDefault: false,
+      },
+    );
   }
 
   /**

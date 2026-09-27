@@ -2,6 +2,8 @@ export type { BatchOnError, BatchOptions, RowAction, RowFailure } from './client
 export type { ExecOptions, ExecOutput, ExecOutputValues, ExecResult } from './client/exec';
 export type { MergeOptions } from './client/merge';
 export type { QueryResult, RawQueryOptions } from './client/query';
+export type { RetryOption, RetryOptions } from './client/retry';
+export { TRANSIENT_ERROR_NUMBERS } from './client/retry';
 export type { SqlClientOptions } from './client/SqlClient';
 export { SqlClient } from './client/SqlClient';
 export type {
@@ -22,6 +24,7 @@ export type {
 export { BatchRowError } from './errors/BatchRowError';
 export { SqlAbortError } from './errors/SqlAbortError';
 export { SqlClientError } from './errors/SqlClientError';
+export { SqlConnectionError } from './errors/SqlConnectionError';
 export type {
   SqlClientEvents,
   SqlConnectEvent,
@@ -29,6 +32,7 @@ export type {
   SqlFailureEvent,
   SqlOperation,
   SqlQueryEvent,
+  SqlRetryEvent,
   SqlRowFailureEvent,
   SqlSuccessEvent,
   SqlTransactionCommitEvent,

@@ -24,6 +24,7 @@ import {
 } from './exec';
 import type { MergeOptions } from './merge';
 import { type QueryResult, queryCommand, queryFileCommand, type RawQueryOptions } from './query';
+import type { RetryOption } from './retry';
 import type { FindOneOptions, SelectOptions } from './select';
 import type { SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlRow } from './types';
@@ -54,6 +55,13 @@ export interface TransactionOptions {
    * by what is left, and the transaction is not committed once the time is up.
    */
   timeout?: number;
+  /**
+   * Run the whole transaction again when it fails with a transient error (e.g. it was chosen as a
+   * deadlock victim). Off by default: `work` may run more than once, so keep side effects outside
+   * the database (emails, HTTP calls…) out of it. Operations inside a transaction are never
+   * retried on their own.
+   */
+  retry?: RetryOption;
 }
 
 /**

@@ -343,6 +343,19 @@ export const poolConnection = (pool: sql.ConnectionPool): BatchConnection => ({
 });
 
 /**
+ * Retries rows that failed with a transient error in `'continue'` mode.
+ *
+ * @internal
+ */
+export interface RowRetry {
+  /** Extra passes over the transient failures. */
+  attempts: number;
+  isTransient: (failure: RowFailure, attempt: number) => boolean;
+  /** Waits before pass `attempt` (1-based); may reject to stop (e.g. timeout). */
+  wait: (attempt: number, failures: RowFailure[]) => Promise<void>;
+}
+
+/**
  * @internal
  */
 export interface ExecuteBatchParams {
@@ -353,6 +366,8 @@ export interface ExecuteBatchParams {
   query: QueryRunner;
   /** Returns an error message for rows that must not be sent. */
   validate?: (row: SqlRow) => string | null;
+  /** Row-level retries for `'continue'` mode. Ignored inside a caller's transaction. */
+  rowRetry?: RowRetry;
 }
 
 /**
@@ -367,6 +382,7 @@ export const executeBatch = async ({
   build,
   query,
   validate = () => null,
+  rowRetry,
 }: ExecuteBatchParams): Promise<BatchOutcome> => {
   const { onError = 'rollback', chunkSize = 500 } = options;
   const result: BatchOutcome = { outcomes: [], failures: [] };
@@ -390,6 +406,33 @@ export const executeBatch = async ({
 
       result.outcomes.push(...chunk.outcomes);
       result.failures.push(...chunk.failures);
+    }
+
+    // Inside a caller's transaction a deadlock already rolled everything back: retrying rows
+    // would be wrong, the whole transaction has to be retried instead.
+    if (rowRetry && !connection.nested) {
+      for (let attempt = 1; attempt <= rowRetry.attempts; attempt++) {
+        const transient = result.failures.filter((failure) =>
+          rowRetry.isTransient(failure, attempt),
+        );
+
+        if (transient.length === 0) {
+          break;
+        }
+
+        await rowRetry.wait(attempt, transient);
+
+        const retrying = new Set(transient.map((failure) => failure.index));
+
+        result.failures = result.failures.filter((failure) => !retrying.has(failure.index));
+
+        for (const indexes of chunkRows(rows, [...retrying], chunkSize)) {
+          const chunk = await runChunkOrRowByRow(query, connection, rows, indexes, build);
+
+          result.outcomes.push(...chunk.outcomes);
+          result.failures.push(...chunk.failures);
+        }
+      }
     }
 
     result.failures.sort((a, b) => a.index - b.index);

@@ -1004,4 +1004,157 @@ describe('SqlClient', () => {
       expect(transaction.rollback).toHaveBeenCalled();
     });
   });
+
+  describe('retry', () => {
+    const deadlock = () => Object.assign(new Error('Transaction was deadlocked'), { number: 1205 });
+    const fast = { retry: { delay: 1 } };
+
+    it('retries a transient error and emits retry events', async () => {
+      const retries = jest.fn();
+
+      request.query
+        .mockRejectedValueOnce(deadlock())
+        .mockRejectedValueOnce(deadlock())
+        .mockResolvedValue({ recordset: [{ id: 1 }], rowsAffected: [1] });
+
+      const client = new SqlClient(config, fast).on('retry', retries);
+
+      await expect(client.select('Users')).resolves.toEqual([{ id: 1 }]);
+      expect(request.query).toHaveBeenCalledTimes(3);
+      expect(retries).toHaveBeenCalledTimes(2);
+      expect(retries).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ operation: 'select', attempt: 1, number: 1205 }),
+      );
+    });
+
+    it('gives up after the configured attempts with the last error', async () => {
+      request.query.mockRejectedValue(deadlock());
+
+      await expect(
+        new SqlClient(config, { retry: { attempts: 2, delay: 1 } }).delete('Users', { id: 1 }),
+      ).rejects.toMatchObject({
+        number: 1205,
+      });
+      expect(request.query).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not retry other errors', async () => {
+      request.query.mockRejectedValue(Object.assign(new Error('duplicate'), { number: 2627 }));
+
+      await expect(new SqlClient(config, fast).insert('Users', { id: 1 })).rejects.toMatchObject({
+        number: 2627,
+      });
+      expect(request.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('can be turned off for the client or a call', async () => {
+      request.query.mockRejectedValue(deadlock());
+
+      await expect(new SqlClient(config, { retry: false }).select('Users')).rejects.toMatchObject({
+        number: 1205,
+      });
+      await expect(
+        new SqlClient(config, fast).select('Users', {}, { retry: false }),
+      ).rejects.toMatchObject({ number: 1205 });
+      expect(request.query).toHaveBeenCalledTimes(2);
+    });
+
+    it('only retries raw SQL when the call opts in', async () => {
+      request.query
+        .mockRejectedValueOnce(deadlock())
+        .mockResolvedValue({ recordsets: [[]], rowsAffected: [0] });
+      const client = new SqlClient(config, fast);
+
+      await expect(client.query('UPDATE T SET a = 1')).rejects.toMatchObject({ number: 1205 });
+
+      request.query.mockRejectedValueOnce(deadlock());
+      await expect(client.query('UPDATE T SET a = 1', {}, { retry: true })).resolves.toMatchObject({
+        rows: [],
+      });
+    });
+
+    it('retries a whole rollback-mode batch when a row was a deadlock victim', async () => {
+      request.query
+        .mockResolvedValueOnce(batchResult([{ i: 0, number: 1205, message: 'deadlocked' }], []))
+        .mockResolvedValue(batchResult([], [{ i: 0, action: 'inserted', id: 7 }]));
+
+      await expect(
+        new SqlClient(config, fast).insertMany('Users', [{ name: 'Ana' }]),
+      ).resolves.toMatchObject({ ids: [7] });
+      expect(transaction.rollback).toHaveBeenCalledTimes(1);
+      expect(transaction.commit).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries only the transient rows of a continue-mode batch', async () => {
+      const retries = jest.fn();
+
+      request.query
+        .mockResolvedValueOnce(
+          batchResult(
+            [
+              { i: 1, number: 1205, message: 'deadlocked' },
+              { i: 2, number: 2627, message: 'duplicate' },
+            ],
+            [{ i: 0, action: 'inserted', id: 1 }],
+          ),
+        )
+        .mockResolvedValueOnce(batchResult([], [{ i: 1, action: 'inserted', id: 2 }]));
+
+      const client = new SqlClient(config, fast).on('retry', retries);
+      const result = await client.insertMany('Users', [{ n: 'a' }, { n: 'b' }, { n: 'c' }], {
+        onError: 'continue',
+      });
+
+      expect(result).toMatchObject({
+        inserted: 2,
+        ids: [1, 2, null],
+        failures: [expect.objectContaining({ index: 2, number: 2627 })],
+      });
+      expect(request.query).toHaveBeenCalledTimes(2);
+      expect(retries).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'insertMany', rows: [1], number: 1205 }),
+      );
+    });
+
+    it('retries a failed connection', async () => {
+      pool.connect.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+      request.query.mockResolvedValue({ recordset: [], rowsAffected: [0] });
+
+      await expect(new SqlClient(config, fast).select('Users')).resolves.toEqual([]);
+      expect(ConnectionPoolMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops retrying when the timeout passes during the wait', async () => {
+      request.query.mockRejectedValue(deadlock());
+
+      await expect(
+        new SqlClient(config, { retry: { delay: 1_000 } }).select('Users', {}, { timeout: 50 }),
+      ).rejects.toMatchObject({ name: 'SqlAbortError', reason: 'timeout', operation: 'select' });
+      expect(request.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries a whole transaction only when asked', async () => {
+      const failOnce = () =>
+        jest
+          .fn<Promise<string>, [unknown]>()
+          .mockRejectedValueOnce(deadlock())
+          .mockResolvedValue('done');
+      const retries = jest.fn();
+      const client = new SqlClient(config, fast).on('retry', retries);
+      const withoutRetry = failOnce();
+      const withRetry = failOnce();
+
+      await expect(client.transaction(withoutRetry)).rejects.toMatchObject({ number: 1205 });
+      await expect(client.transaction(withRetry, { retry: true })).resolves.toBe('done');
+
+      expect(withoutRetry).toHaveBeenCalledTimes(1);
+      expect(withRetry).toHaveBeenCalledTimes(2);
+      expect(transaction.rollback).toHaveBeenCalledTimes(2);
+      expect(transaction.commit).toHaveBeenCalledTimes(1);
+      expect(retries).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'transaction', number: 1205 }),
+      );
+    });
+  });
 });

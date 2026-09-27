@@ -175,3 +175,41 @@ export const createCallGuard = (
 
   return { check, run };
 };
+
+/**
+ * Waits `ms`, rejecting early with a {@link SqlAbortError} when the scope's signal aborts or its
+ * deadline passes first.
+ *
+ * @internal
+ */
+export const pause = async (ms: number, scope?: CallScope): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    const signal = scope?.signal;
+
+    if (scope && signal?.aborted) {
+      reject(new SqlAbortError(scope.name, 'abort', { cause: signal.reason }));
+
+      return;
+    }
+
+    const remaining = scope?.deadline === undefined ? Infinity : scope.deadline - performance.now();
+    const timesOut = remaining < ms;
+    const timer = setTimeout(
+      () => {
+        signal?.removeEventListener('abort', onAbort);
+
+        if (timesOut && scope) {
+          reject(new SqlAbortError(scope.name, 'timeout', { timeout: scope.timeout }));
+        } else {
+          resolve();
+        }
+      },
+      Math.max(0, Math.min(ms, remaining)),
+    );
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new SqlAbortError(scope?.name ?? 'retry', 'abort', { cause: signal?.reason }));
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
