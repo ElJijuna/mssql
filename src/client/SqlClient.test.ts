@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sql from 'mssql';
 import { BatchRowError } from '../errors/BatchRowError';
+import { SqlAbortError } from '../errors/SqlAbortError';
 import { SqlClientError } from '../errors/SqlClientError';
 import { t } from '../types/SqlParam';
 import { SqlClient } from './SqlClient';
@@ -39,13 +40,19 @@ const batchResult = (failures: unknown[], outcomes: unknown[]) => ({
 
 describe('SqlClient', () => {
   let pool: { connect: jest.Mock; close: jest.Mock; request: jest.Mock; transaction: jest.Mock };
-  let request: { input: jest.Mock; query: jest.Mock; parameters: Record<string, unknown> };
+  let request: {
+    input: jest.Mock;
+    query: jest.Mock;
+    cancel: jest.Mock;
+    parameters: Record<string, unknown>;
+  };
   let transaction: { begin: jest.Mock; commit: jest.Mock; rollback: jest.Mock; request: jest.Mock };
 
   beforeEach(() => {
     request = {
       input: jest.fn(),
       query: jest.fn().mockResolvedValue({ recordset: [{ id: 42 }] }),
+      cancel: jest.fn(),
       parameters: {},
     };
     transaction = {
@@ -896,6 +903,99 @@ describe('SqlClient', () => {
 
       expect(rows).toEqual([{ id: 1 }]);
       expect(transaction.commit).toHaveBeenCalled();
+    });
+  });
+
+  describe('signal and timeout', () => {
+    const pending = () => new Promise<never>(() => undefined);
+
+    it('cancels the query and rejects with SqlAbortError when the signal aborts', async () => {
+      const controller = new AbortController();
+      const failure = jest.fn();
+
+      request.query.mockReturnValue(pending());
+      const client = new SqlClient(config).on('failure', failure);
+      const running = client.select('Users', {}, { signal: controller.signal });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      controller.abort();
+
+      await expect(running).rejects.toBeInstanceOf(SqlAbortError);
+      expect(request.cancel).toHaveBeenCalled();
+      expect(failure).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'select', error: expect.any(SqlAbortError) as Error }),
+      );
+    });
+
+    it('does not connect when the signal is already aborted', async () => {
+      await expect(
+        new SqlClient(config).delete('Users', { id: 1 }, { signal: AbortSignal.abort() }),
+      ).rejects.toMatchObject({
+        reason: 'abort',
+      });
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
+    it('times out a slow query', async () => {
+      request.query.mockReturnValue(pending());
+
+      await expect(
+        new SqlClient(config).query('WAITFOR DELAY @d', { d: '00:01' }, { timeout: 20 }),
+      ).rejects.toMatchObject({
+        reason: 'timeout',
+        message: 'query timed out after 20 ms',
+      });
+      expect(request.cancel).toHaveBeenCalled();
+    });
+
+    it('stops a continue-mode batch instead of reporting row failures', async () => {
+      request.query.mockReturnValue(pending());
+
+      await expect(
+        new SqlClient(config).insertMany('Users', [{ name: 'Ana' }, { name: 'Luis' }], {
+          onError: 'continue',
+          timeout: 20,
+        }),
+      ).rejects.toBeInstanceOf(SqlAbortError);
+      expect(request.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('rolls back a transaction that runs out of time before committing', async () => {
+      const rollback = jest.fn();
+      const client = new SqlClient(config).on('transactionRollback', rollback);
+
+      request.query.mockResolvedValue({ recordset: [], rowsAffected: [1] });
+
+      await expect(
+        client.transaction(
+          async (tx) => {
+            await tx.update('Users', { active: false }, { id: 1 });
+            await new Promise((resolve) => setTimeout(resolve, 30));
+          },
+          { timeout: 10 },
+        ),
+      ).rejects.toMatchObject({ operation: 'transaction', reason: 'timeout' });
+      expect(transaction.commit).not.toHaveBeenCalled();
+      expect(transaction.rollback).toHaveBeenCalled();
+      expect(rollback).toHaveBeenCalledWith(
+        expect.objectContaining({ error: expect.any(SqlAbortError) as Error }),
+      );
+    });
+
+    it('cancels the running query when the transaction signal aborts', async () => {
+      const controller = new AbortController();
+
+      request.query.mockReturnValue(pending());
+      const running = new SqlClient(config).transaction(async (tx) => tx.select('Users'), {
+        signal: controller.signal,
+      });
+
+      await new Promise((resolve) => setImmediate(resolve));
+      controller.abort();
+
+      await expect(running).rejects.toMatchObject({ operation: 'transaction', reason: 'abort' });
+      expect(request.cancel).toHaveBeenCalled();
+      expect(transaction.rollback).toHaveBeenCalled();
     });
   });
 });

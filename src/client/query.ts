@@ -43,10 +43,11 @@ const run = async <TRow extends object>(
     assertParameters(analysis, params, source);
   }
 
+  const query = ctx.runner(operation, options);
   const request = await ctx.request();
   const statement = bindNamedParameters(request, text, analysis, params);
   const display = operation === 'queryFile' ? `-- ${source}\n${statement}` : statement;
-  const result = await ctx.runner(operation, options)(request, display, async (req) =>
+  const result = await query(request, display, async (req) =>
     req.query<Record<string, unknown>>(statement),
   );
   const recordsets = (result.recordsets as unknown as SqlRow[][] | undefined) ?? [];

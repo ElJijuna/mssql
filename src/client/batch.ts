@@ -1,6 +1,7 @@
 import type sql from 'mssql';
 import type { QueryOptions, QueryRunner } from '../debug/debug';
 import { BatchRowError } from '../errors/BatchRowError';
+import { SqlAbortError } from '../errors/SqlAbortError';
 import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlRow } from './types';
 
@@ -249,7 +250,12 @@ const runChunkOrRowByRow = async (
 
   try {
     return await runChunk(query, request(), rows, indexes, 'continue', build, nested);
-  } catch {
+  } catch (chunkError) {
+    // A cancelled call stops the whole batch; it is not a row failure to retry.
+    if (chunkError instanceof SqlAbortError) {
+      throw chunkError;
+    }
+
     const outcome: BatchOutcome = { outcomes: [], failures: [] };
 
     for (const i of indexes) {
@@ -259,6 +265,10 @@ const runChunkOrRowByRow = async (
         outcome.outcomes.push(...single.outcomes);
         outcome.failures.push(...single.failures);
       } catch (error) {
+        if (error instanceof SqlAbortError) {
+          throw error;
+        }
+
         outcome.failures.push({ index: i, row: rows[i] ?? {}, ...describeError(error) });
       }
     }

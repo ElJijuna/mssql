@@ -86,6 +86,7 @@ export const execCommand = async <TRow extends object, TOutput extends ExecOutpu
     throw new SqlClientError('exec requires a procedure name');
   }
 
+  const query = ctx.runner('exec', options);
   const request = await ctx.request();
   const inputs = Object.entries(params).map(([name, value]) => {
     const bare = paramName(name);
@@ -101,10 +102,8 @@ export const execCommand = async <TRow extends object, TOutput extends ExecOutpu
 
     return bare;
   });
-  const result = (await ctx.runner('exec', options)(
-    request,
-    execScript(procedure, inputs, outputs),
-    async (req) => req.execute<Record<string, unknown>>(procedure),
+  const result = (await query(request, execScript(procedure, inputs, outputs), async (req) =>
+    req.execute<Record<string, unknown>>(procedure),
   )) as sql.IProcedureResult<Record<string, unknown>>;
   const recordsets = (result.recordsets as unknown as SqlRow[][] | undefined) ?? [];
 

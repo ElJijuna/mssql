@@ -48,6 +48,18 @@ export interface QueryOptions {
    * single call when debug is on globally.
    */
   debug?: SqlDebugOption;
+  /**
+   * Cancels the call when aborted: the running query is cancelled on the server and the call
+   * rejects with a {@link SqlAbortError} (`reason: 'abort'`).
+   */
+  signal?: AbortSignal;
+  /**
+   * Maximum time for the whole call in milliseconds, counted from the moment the call starts and
+   * covering every chunk of a batch. When it passes, the running query is cancelled and the call
+   * rejects with a {@link SqlAbortError} (`reason: 'timeout'`). Opening a connection is not
+   * interrupted (the pool's `connectionTimeout` bounds it), but nothing is sent once the time is up.
+   */
+  timeout?: number;
 }
 
 type RequestParameter = sql.IRequestParameters[string];

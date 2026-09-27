@@ -44,6 +44,16 @@ export type SqlIsolationLevel =
 export interface TransactionOptions {
   /** Defaults to the server default (`readCommitted`). */
   isolationLevel?: SqlIsolationLevel;
+  /**
+   * Cancels the transaction when aborted: the running query is cancelled, the transaction rolls
+   * back and `transaction()` rejects with a {@link SqlAbortError}.
+   */
+  signal?: AbortSignal;
+  /**
+   * Maximum time for the whole transaction in milliseconds. Every operation inside it is limited
+   * by what is left, and the transaction is not committed once the time is up.
+   */
+  timeout?: number;
 }
 
 /**

@@ -50,10 +50,11 @@ const runBatch = async (
   params: Omit<ExecuteBatchParams, 'connection' | 'query'>,
 ): Promise<BatchOutcome> => {
   try {
+    const query = ctx.runner(operation, params.options);
     const outcome = await executeBatch({
       ...params,
       connection: await ctx.connection(),
-      query: ctx.runner(operation, params.options),
+      query,
     });
 
     for (const failure of outcome.failures) {
@@ -85,12 +86,10 @@ export const insertCommand = async (
   row: SqlRow,
   options: QueryOptions,
 ): Promise<number | null> => {
+  const query = ctx.runner('insert', options);
   const request = await ctx.request();
   const insert = buildInsertStatement(quoteIdentifier(table), row, request);
-  const result = await ctx.runner('insert', options)(
-    request,
-    `${insert} SELECT SCOPE_IDENTITY() AS id;`,
-  );
+  const result = await query(request, `${insert} SELECT SCOPE_IDENTITY() AS id;`);
   const id = result.recordset[0]?.id;
 
   return typeof id === 'number' ? id : null;
@@ -193,11 +192,12 @@ export const updateCommand = async (
     throw new SqlClientError('update requires at least one column to set');
   }
 
+  const query = ctx.runner('update', options);
   const request = await ctx.request();
   const set = bindRow(values, request, 0);
   const { predicate } = bindWhere(where, request, set.size);
   const assignments = [...set].map(([column, param]) => `${quoteIdentifier(column)} = ${param}`);
-  const result = await ctx.runner('update', options)(
+  const result = await query(
     request,
     `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')} WHERE ${predicate};`,
   );
@@ -216,12 +216,10 @@ export const deleteCommand = async (
 ): Promise<number> => {
   requireWhere('delete', where);
 
+  const query = ctx.runner('delete', options);
   const request = await ctx.request();
   const { predicate } = bindWhere(where, request, 0);
-  const result = await ctx.runner('delete', options)(
-    request,
-    `DELETE FROM ${quoteIdentifier(table)} WHERE ${predicate};`,
-  );
+  const result = await query(request, `DELETE FROM ${quoteIdentifier(table)} WHERE ${predicate};`);
 
   return result.rowsAffected[0] ?? 0;
 };
@@ -236,9 +234,10 @@ export const selectCommand = async <TRow extends object>(
   options: SelectOptions,
   operation: 'select' | 'findOne' = 'select',
 ): Promise<TRow[]> => {
+  const query = ctx.runner(operation, options);
   const request = await ctx.request();
   const statement = buildSelect(table, where, options, request);
-  const result = await ctx.runner(operation, options)(request, statement);
+  const result = await query(request, statement);
 
   return result.recordset as unknown as TRow[];
 };

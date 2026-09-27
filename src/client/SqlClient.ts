@@ -12,6 +12,7 @@ import { TypedEmitter } from '../events/TypedEmitter';
 import { SqlFileLoader } from '../files/SqlFileLoader';
 import type { SqlParams } from '../sql/bindNamed';
 import { type BatchOptions, describeError, poolConnection, rollbackQuietly } from './batch';
+import { type CallScope, createCallGuard, createScope } from './cancellation';
 import {
   type CommandContext,
   deleteCommand,
@@ -118,17 +119,23 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   }
 
   /**
-   * Creates the function every helper uses to send SQL: prints it when debug is on and emits the
-   * `query`, `success` and `failure` events.
+   * Creates the function every helper uses to send SQL: prints it when debug is on, emits the
+   * `query`, `success` and `failure` events, and enforces the call's `signal` and `timeout`.
+   * Create it before connecting, so the timeout also covers waiting for a connection.
    */
   private runner(
     operation: SqlOperation,
     options: QueryOptions,
     transactionId: number | null,
+    scope?: CallScope,
   ): QueryRunner {
     const logger = resolveLogger(this.options.debug, options.debug);
+    const guard = createCallGuard(operation, options, scope);
 
     return async (request, text, run = async (req) => req.query<Record<string, unknown>>(text)) => {
+      guard.check();
+
+      const execute = async () => guard.run(request, run(request));
       const observed =
         logger !== null ||
         this.hasListeners('query') ||
@@ -136,7 +143,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
         this.hasListeners('failure');
 
       if (!observed) {
-        return run(request);
+        return execute();
       }
 
       const entry = createDebugEntry(operation, request, text);
@@ -154,7 +161,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
       const start = performance.now();
 
       try {
-        const result = await run(request);
+        const result = await execute();
 
         this.emit('success', {
           ...event,
@@ -217,6 +224,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     work: (tx: SqlTransaction) => Promise<TResult>,
     options: TransactionOptions = {},
   ): Promise<TResult> {
+    const scope = createScope('transaction', options);
     const pool = await this.connect();
     const transaction = pool.transaction();
     const transactionId = ++this.transactionId;
@@ -228,7 +236,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     const start = performance.now();
     const tx = new SqlTransaction(transaction, transactionId, {
       sqlFile: async (file) => this.sqlFiles.load(file),
-      runner: (operation, queryOptions, id) => this.runner(operation, queryOptions, id),
+      runner: (operation, queryOptions, id) => this.runner(operation, queryOptions, id, scope),
       rowFailure: (event) => {
         this.emit('rowFailure', event);
       },
@@ -241,6 +249,8 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
 
       await tx.settle();
       tx.finish();
+      // Don't commit a transaction whose signal fired or whose time ran out meanwhile.
+      createCallGuard('transaction', {}, scope).check();
       await transaction.commit();
       this.emit('transactionCommit', { transactionId, durationMs: performance.now() - start });
 

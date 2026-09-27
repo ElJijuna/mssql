@@ -20,6 +20,7 @@ export type {
   SqlDebugParam,
 } from './debug/debug';
 export { BatchRowError } from './errors/BatchRowError';
+export { SqlAbortError } from './errors/SqlAbortError';
 export { SqlClientError } from './errors/SqlClientError';
 export type {
   SqlClientEvents,

@@ -10,6 +10,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
 - [Raw SQL and .sql files](#raw-sql-and-sql-files) · [Stored procedures](#stored-procedures) · [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
+- [Cancellation and timeouts](#cancellation-and-timeouts)
 - [Error handling](#error-handling)
 - [Debug mode](#debug-mode)
 - [Events](#events)
@@ -380,6 +381,8 @@ const orderId = await client.transaction(async (tx) => {
 | Option | Default | Description |
 | --- | --- | --- |
 | `isolationLevel` | server default (`readCommitted`) | `'readUncommitted'`, `'readCommitted'`, `'repeatableRead'`, `'serializable'` or `'snapshot'` |
+| `timeout` | none | Max ms for the whole transaction. See [cancellation and timeouts](#cancellation-and-timeouts). |
+| `signal` | none | `AbortSignal` that cancels the transaction. |
 
 ```ts
 await client.transaction(async (tx) => { /* ... */ }, { isolationLevel: 'serializable' });
@@ -438,12 +441,65 @@ await client.insert('dbo.Products', {
 | Date / time | `date`, `time(v, scale)`, `datetime`, `datetime2(v, scale)`, `datetimeoffset(v, scale)`, `smalldatetime` |
 | Other | `uniqueidentifier`, `xml` |
 
+## Cancellation and timeouts
+
+Every helper accepts `signal` and `timeout` in its options (`select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`, `query`, `queryFile`, and the same on `tx`):
+
+```ts
+// Stop a slow report after 5 seconds
+const { rows } = await client.queryFile('reports/sales-per-day', params, { timeout: 5_000 });
+
+// Cancel when the HTTP client disconnects
+app.get('/users', async (req, res) => {
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort(); // client left before we answered
+  });
+
+  const users = await client.select('dbo.Users', { active: true }, { signal: controller.signal });
+  res.json(users);
+});
+```
+
+When the signal aborts or the time is up, the running query is **cancelled on the server** and the call rejects with a `SqlAbortError`:
+
+```ts
+import { SqlAbortError } from '@pilmee/mssql';
+
+try {
+  await client.insertMany('dbo.Events', events, { timeout: 10_000 });
+} catch (error) {
+  if (error instanceof SqlAbortError) {
+    error.reason;    // 'timeout' | 'abort'
+    error.operation; // 'insertMany'
+  }
+}
+```
+
+- `timeout` counts from the moment the call starts and covers **all** its queries (every chunk of a batch). Opening a connection is not interrupted — the pool's `connectionTimeout` bounds that — but nothing is sent once the time is up.
+- A signal that is already aborted fails immediately, without connecting.
+- Batches: in `'rollback'` mode nothing is saved; in `'continue'` mode the call stops (it is not reported as row failures) and chunks that already finished stay saved.
+- The same `AbortSignal` can be reused across many calls: listeners are removed when each query ends.
+
+**Transactions** take their own `timeout` / `signal` for the whole unit of work. Each operation inside is limited by whatever is left (and by its own options, whichever ends first), and the transaction is **never committed** once the time is up or the signal fired — it rolls back and `transaction()` rejects with a `SqlAbortError` whose `operation` is `'transaction'`:
+
+```ts
+await client.transaction(
+  async (tx) => {
+    await tx.insertMany('dbo.OrderLines', lines);
+    await tx.exec('dbo.RecalculateStock', { orderId });
+  },
+  { timeout: 15_000 },
+);
+```
+
 ## Error handling
 
 | Error | When |
 | --- | --- |
 | `SqlClientError` | Base class. Connection failures, invalid identifiers, empty `where`, unexpected batch errors (original error in `cause`). |
 | `BatchRowError` | `insertMany` / `merge` in `'rollback'` mode when a row fails. Has `index`, `row`, `number`, `sqlMessage`. Nothing was saved. |
+| `SqlAbortError` | The call's `signal` aborted or its `timeout` passed; the query was cancelled. Has `reason` (`'abort'` / `'timeout'`) and `operation`; `cause` is the signal's reason. |
 
 In `'continue'` mode batch helpers don't throw; each entry in `failures` has `index`, `row`, `number` and `message`. `number` is the SQL Server error number (e.g. `2627` unique key, `547` foreign key, `515` NOT NULL, `2628` truncation), or `null` when the error came from the driver or from validation.
 
