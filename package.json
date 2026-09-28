@@ -1,0 +1,83 @@
+{
+    "name": "@pilmee/mssql",
+    "version": "1.0.0-beta.1",
+    "description": "Helpers on top of mssql to make common Microsoft SQL Server tasks easier",
+    "homepage": "https://github.com/ElJijuna/mssql#readme",
+    "bugs": {
+        "url": "https://github.com/ElJijuna/mssql/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/ElJijuna/mssql.git"
+    },
+    "license": "MIT",
+    "author": "pilmee <pilmee@gmail.com> (https://github.com/ElJijuna)",
+    "type": "module",
+    "main": "dist/index.cjs",
+    "module": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "require": "./dist/index.cjs"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "engines": {
+        "node": ">=20"
+    },
+    "keywords": [
+        "mssql",
+        "sql-server",
+        "sqlserver",
+        "tedious",
+        "database",
+        "typescript"
+    ],
+    "scripts": {
+        "build": "tsup",
+        "typecheck": "tsc --noEmit",
+        "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
+        "format": "biome check --write .",
+        "format:check": "biome check .",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "test": "jest",
+        "test:coverage": "jest --coverage",
+        "docs": "typedoc",
+        "db:up": "docker compose up -d --wait",
+        "db:down": "docker compose down -v",
+        "test:integration": "jest --config jest.integration.config.ts --runInBand"
+    },
+    "dependencies": {
+        "@types/mssql": "^12.3.0"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^2.5.14",
+        "@semantic-release/changelog": "^7.0.0",
+        "@semantic-release/github": "^12.0.10",
+        "@semantic-release/npm": "^13.2.0",
+        "@types/jest": "^30.0.0",
+        "@types/node": "^22.20.4",
+        "eslint": "^10.11.0",
+        "jest": "^30.5.2",
+        "mssql": "^12.7.2",
+        "semantic-release": "^25.0.9",
+        "super-configs": "^1.26.0",
+        "ts-jest": "^29.4.14",
+        "ts-node": "^10.9.2",
+        "tsup": "^8.5.1",
+        "typedoc": "^0.28.20",
+        "typescript": "^6.0.3"
+    },
+    "peerDependencies": {
+        "mssql": "^12.0.0"
+    },
+    "sideEffects": false
+}

@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - beta
+
+jobs:
+  release:
+    name: Release & Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # create releases and push CHANGELOG commits
+      issues: write         # comment on issues when released
+      pull-requests: write  # comment on PRs when released
+      id-token: write       # provenance for npm
+    outputs:
+      new_release_published: ${{ steps.release.outputs.new_release_published }}
+      new_release_version: ${{ steps.release.outputs.new_release_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Semantic Release
+        id: release
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          semantic_version: 24
+          extra_plugins: |
+            @semantic-release/changelog@6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create changelog PR
+        if: steps.release.outputs.new_release_published == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.release.outputs.new_release_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          BRANCH="chore/release-v${NEW_VERSION}"
+          git checkout -b "$BRANCH"
+          git add CHANGELOG.md package.json package-lock.json
+          git commit -m "chore(release): ${NEW_VERSION}"
+          git push origin "$BRANCH"
+          cat > /tmp/pr_body.md << EOF
+          ## What does this PR do?
+
+          Automated changelog and version bump for release v${NEW_VERSION}.
+
+          ## Checklist
+
+          - [x] \`npm test\` passes
+          - [ ] New code has tests
+          - [ ] \`src/index.ts\` exports any new public types
+          - [ ] README updated if a new helper was added
+          - [x] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
+          EOF
+          gh pr create \
+            --title "chore(release): v${NEW_VERSION}" \
+            --body-file /tmp/pr_body.md \
+            --base "${GITHUB_REF_NAME}" \
+            --head "$BRANCH"
+
+      - name: Generate documentation
+        if: steps.release.outputs.new_release_published == 'true' && github.ref_name == 'main'
+        run: npm run docs
+
+      - name: Upload documentation artifact
+        if: steps.release.outputs.new_release_published == 'true' && github.ref_name == 'main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs
+
+  github-packages:
+    name: Publish to GitHub Packages
+    needs: release
+    if: needs.release.outputs.new_release_published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: '@eljijuna'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Rename package for GitHub Packages
+        env:
+          NEW_VERSION: ${{ needs.release.outputs.new_release_version }}
+        run: |
+          npm pkg set name=@eljijuna/mssql
+          npm pkg set version="$NEW_VERSION"
+          npm pkg set publishConfig.registry=https://npm.pkg.github.com
+
+      - name: Publish
+        run: |
+          if [[ "$NEW_VERSION" == *-* ]]; then
+            npm publish --tag "${GITHUB_REF_NAME}"
+          else
+            npm publish
+          fi
+        env:
+          NEW_VERSION: ${{ needs.release.outputs.new_release_version }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docs:
+    name: Deploy documentation
+    needs: release
+    if: needs.release.outputs.new_release_published == 'true' && github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
