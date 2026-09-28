@@ -3,6 +3,7 @@ import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlOperation } from '../events/events';
 import { analyzeSql, type SqlAnalysis } from '../sql/analyze';
 import { assertParameters, bindNamedParameters, type SqlParams } from '../sql/bindNamed';
+import { compileFragment, isTemplateStringsArray, SqlFragment } from '../sql/fragment';
 import type { CommandContext } from './commands';
 import type { SqlRow } from './types';
 
@@ -87,4 +88,36 @@ export const queryFileCommand = async <TRow extends object>(
   const { name, text, analysis } = await ctx.sqlFile(file);
 
   return run<TRow>(ctx, 'queryFile', name, text, analysis, params, options);
+};
+
+/**
+ * The three ways to call `query`: SQL text with parameters, a tagged template, or a {@link tsql}
+ * fragment with options.
+ *
+ * @internal
+ */
+export type QueryInput = string | TemplateStringsArray | SqlFragment;
+
+/**
+ * Normalizes the arguments of `query` into SQL text, parameters and options.
+ *
+ * @internal
+ */
+export const normalizeQuery = (
+  input: QueryInput,
+  rest: unknown[],
+): { text: string; params: SqlParams; options: RawQueryOptions } => {
+  if (isTemplateStringsArray(input)) {
+    return { ...compileFragment(new SqlFragment([...input], rest)), options: {} };
+  }
+
+  if (input instanceof SqlFragment) {
+    return { ...compileFragment(input), options: (rest[0] as RawQueryOptions | undefined) ?? {} };
+  }
+
+  return {
+    text: input,
+    params: (rest[0] as SqlParams | undefined) ?? {},
+    options: (rest[1] as RawQueryOptions | undefined) ?? {},
+  };
 };

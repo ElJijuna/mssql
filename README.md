@@ -8,7 +8,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Connect](#connect)
 - [Select / findOne](#select--findone) · [Where filters](#where-filters)
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
-- [Raw SQL and .sql files](#raw-sql-and-sql-files) · [Stored procedures](#stored-procedures) · [Transactions](#transactions)
+- [Tagged template queries](#tagged-template-queries) · [Raw SQL and .sql files](#raw-sql-and-sql-files) · [Stored procedures](#stored-procedures) · [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
 - [Cancellation and timeouts](#cancellation-and-timeouts) · [Retries](#retries)
 - [Error handling](#error-handling)
@@ -65,7 +65,7 @@ In every helper, values are sent as parameters and table/column names are bracke
 | `merge(table, rows, { on, ... })` | `UPDATE` if exists, else `INSERT` | `{ inserted, updated, skipped, actions, ids, failures }` |
 | `update(table, values, where)` | `UPDATE … WHERE` | rows affected |
 | `delete(table, where)` | `DELETE … WHERE` | rows affected |
-| `query(sql, params?)` | any T-SQL, one batch | `{ rows, recordsets, rowsAffected }` |
+| ``query`…${value}…` `` / `query(sql, params?)` | any T-SQL, one batch | `{ rows, recordsets, rowsAffected }` |
 | `queryFile(file, params?)` | the SQL in a `.sql` file | `{ rows, recordsets, rowsAffected }` |
 | `exec(procedure, params?, { output? })` | `EXEC` (RPC) | `{ rows, recordsets, output, returnValue, rowsAffected }` |
 | `transaction(async (tx) => …, options?)` | `BEGIN` … `COMMIT` / `ROLLBACK` | whatever the callback returns |
@@ -220,9 +220,59 @@ const removed = await client.delete('dbo.Sessions', { userId: 42 });
 
 Same [where filters](#where-filters) as `update`, and an empty `where` throws.
 
+## Tagged template queries
+
+Write SQL inline and interpolate values with `${…}`: every value becomes a real parameter (`@p0`, `@p1`…), never text pasted into the SQL. Like every helper, these queries go through debug mode, events, timeouts and retries.
+
+```ts
+const { rows } = await client.query<User>`
+  SELECT id, name
+  FROM dbo.Users
+  WHERE tenantId = ${tenantId}
+    AND role IN (${roles})          -- arrays expand: IN (@p1__0, @p1__1)
+    AND createdAt >= ${t.datetime2(since, 3)}`;
+```
+
+Need options (`timeout`, `retry`, `debug`…)? Build the SQL with `tsql` and pass it with the options:
+
+```ts
+import { tsql } from '@pilmee/mssql';
+
+await client.query(tsql`DELETE FROM dbo.Sessions WHERE expiresAt < ${new Date()}`, { timeout: 5_000 });
+```
+
+**Dynamic SQL without string concatenation** — fragments compose, and their values stay parameters:
+
+```ts
+const filters = [tsql`tenantId = ${tenantId}`];
+
+if (search) filters.push(tsql`name LIKE ${`%${search}%`}`);
+if (roles.length > 0) filters.push(tsql`role IN (${roles})`);
+
+const direction = sortDesc ? tsql.raw('DESC') : tsql.raw('ASC'); // from a fixed list, never user input
+
+const { rows } = await client.query<User>`
+  SELECT ${tsql.join(['id', 'name', 'role'].map(tsql.id))}
+  FROM ${tsql.id('dbo.Users')}
+  WHERE ${tsql.join(filters, ' AND ')}
+  ORDER BY name ${direction}`;
+```
+
+| Helper | Inserts | Use it for |
+| --- | --- | --- |
+| `${value}` | a parameter | every value (numbers, strings, dates, `t.*`, arrays for `IN`) |
+| ``tsql`…` `` | the fragment, with its own parameters | optional or repeated pieces of SQL |
+| `tsql.id(name)` | a bracket-quoted name (`[dbo].[Users]`) | table/column names that come from variables |
+| `tsql.join(items, separator?)` | items separated by `, ` (or `separator`) | column lists, `AND`-ed filters, `VALUES` rows |
+| `tsql.raw(text)` | text as-is — **not escaped** | trusted keywords only (e.g. `ASC`/`DESC` from a fixed list) |
+
+Don't put quotes around a value: `WHERE name = '${name}'` would send the text `'@p0'`. That mistake is caught before connecting with a clear error; write `WHERE name = ${name}`.
+
+`tx.query` accepts the same forms inside transactions.
+
 ## Raw SQL and .sql files
 
-For anything the helpers don't cover (joins, ranges, `LIKE`, CTEs, functions…) write the SQL yourself and pass parameters by name. Keep it inline with `query`, or in `.sql` files with `queryFile`.
+For anything the helpers don't cover (joins, ranges, `LIKE`, CTEs, functions…) you can also write the SQL with named `@parameters`: inline with `query(sql, params)`, or in `.sql` files with `queryFile`.
 
 ```sql
 -- sql/users/get-by-tenant.sql

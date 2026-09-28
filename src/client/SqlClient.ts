@@ -11,6 +11,7 @@ import type { SqlClientEvents, SqlOperation } from '../events/events';
 import { TypedEmitter } from '../events/TypedEmitter';
 import { SqlFileLoader } from '../files/SqlFileLoader';
 import type { SqlParams } from '../sql/bindNamed';
+import type { SqlFragment } from '../sql/fragment';
 import { type BatchOptions, describeError, poolConnection, rollbackQuietly } from './batch';
 import { type CallScope, createCallGuard, createScope, pause } from './cancellation';
 import {
@@ -31,7 +32,14 @@ import {
   execCommand,
 } from './exec';
 import type { MergeOptions } from './merge';
-import { type QueryResult, queryCommand, queryFileCommand, type RawQueryOptions } from './query';
+import {
+  normalizeQuery,
+  type QueryInput,
+  type QueryResult,
+  queryCommand,
+  queryFileCommand,
+  type RawQueryOptions,
+} from './query';
 import {
   errorNumber,
   isRetryable,
@@ -613,31 +621,49 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   }
 
   /**
-   * Runs raw SQL with parameters by name — for anything the helpers don't cover (joins, ranges,
-   * `LIKE`, CTEs, functions…).
+   * Runs raw SQL — for anything the helpers don't cover (joins, ranges, `LIKE`, CTEs, functions…).
+   * Three forms, all parameterized, all shown by debug mode and events:
    *
-   * Every `@name` in the SQL is bound from `params` (plain values or {@link t} builders). An array
-   * expands into a list, so `IN (@ids)` works. Missing parameters fail before sending; variables
-   * you `DECLARE` in the SQL don't count.
+   * - **Tagged template**: every `${value}` becomes a parameter.
+   * - **{@link tsql} fragment + options**: the same, when you need `timeout`, `retry`, `debug`…
+   * - **Text + named parameters**: every `@name` is bound from `params`.
    *
-   * @param sql - T-SQL text (one batch).
-   * @param params - Parameters by name; a leading `@` is optional.
-   * @param options - See {@link RawQueryOptions}.
+   * Values can be plain or {@link t} builders; arrays expand so `IN (…)` works. Missing
+   * parameters fail before sending; variables you `DECLARE` in the SQL don't count.
    *
    * @example
    * ```ts
-   * const { rows } = await client.query<User>(
+   * const { rows } = await client.query<User>`
+   *   SELECT id, name FROM dbo.Users WHERE tenantId = ${tenantId} AND id IN (${ids})`;
+   *
+   * await client.query(tsql`DELETE FROM dbo.Sessions WHERE expiresAt < ${now}`, { timeout: 5_000 });
+   *
+   * await client.query<User>(
    *   'SELECT id, name FROM dbo.Users WHERE tenantId = @tenantId AND id IN (@ids)',
    *   { tenantId: 7, ids: [1, 2, 3] },
    * );
    * ```
    */
   public async query<TRow extends object = SqlRow>(
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ): Promise<QueryResult<TRow>>;
+  public async query<TRow extends object = SqlRow>(
+    fragment: SqlFragment,
+    options?: RawQueryOptions,
+  ): Promise<QueryResult<TRow>>;
+  public async query<TRow extends object = SqlRow>(
     sql: string,
-    params: SqlParams = {},
-    options: RawQueryOptions = {},
+    params?: SqlParams,
+    options?: RawQueryOptions,
+  ): Promise<QueryResult<TRow>>;
+  public async query<TRow extends object = SqlRow>(
+    input: QueryInput,
+    ...rest: unknown[]
   ): Promise<QueryResult<TRow>> {
-    return this.call('query', options, async (ctx, o) => queryCommand<TRow>(ctx, sql, params, o), {
+    const { text, params, options } = normalizeQuery(input, rest);
+
+    return this.call('query', options, async (ctx, o) => queryCommand<TRow>(ctx, text, params, o), {
       retryByDefault: false,
     });
   }

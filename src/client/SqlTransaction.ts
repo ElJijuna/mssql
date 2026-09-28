@@ -4,6 +4,7 @@ import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlOperation, SqlRowFailureEvent } from '../events/events';
 import type { SqlFile } from '../files/SqlFileLoader';
 import type { SqlParams } from '../sql/bindNamed';
+import type { SqlFragment } from '../sql/fragment';
 import type { BatchConnection, BatchOptions } from './batch';
 import {
   type CommandContext,
@@ -23,7 +24,14 @@ import {
   execCommand,
 } from './exec';
 import type { MergeOptions } from './merge';
-import { type QueryResult, queryCommand, queryFileCommand, type RawQueryOptions } from './query';
+import {
+  normalizeQuery,
+  type QueryInput,
+  type QueryResult,
+  queryCommand,
+  queryFileCommand,
+  type RawQueryOptions,
+} from './query';
 import type { RetryOption } from './retry';
 import type { FindOneOptions, SelectOptions } from './select';
 import type { SqlWhere } from './statements';
@@ -183,13 +191,27 @@ export class SqlTransaction {
     );
   }
 
-  /** Transaction version of {@link SqlClient.query}. */
+  /** Transaction version of {@link SqlClient.query}: tagged template, fragment or text. */
+  public async query<TRow extends object = SqlRow>(
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ): Promise<QueryResult<TRow>>;
+  public async query<TRow extends object = SqlRow>(
+    fragment: SqlFragment,
+    options?: RawQueryOptions,
+  ): Promise<QueryResult<TRow>>;
   public async query<TRow extends object = SqlRow>(
     sql: string,
-    params: SqlParams = {},
-    options: RawQueryOptions = {},
+    params?: SqlParams,
+    options?: RawQueryOptions,
+  ): Promise<QueryResult<TRow>>;
+  public async query<TRow extends object = SqlRow>(
+    input: QueryInput,
+    ...rest: unknown[]
   ): Promise<QueryResult<TRow>> {
-    return this.enqueue(async () => queryCommand<TRow>(this.context, sql, params, options));
+    const { text, params, options } = normalizeQuery(input, rest);
+
+    return this.enqueue(async () => queryCommand<TRow>(this.context, text, params, options));
   }
 
   /** Transaction version of {@link SqlClient.queryFile}. */

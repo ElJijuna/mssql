@@ -5,6 +5,7 @@ import sql from 'mssql';
 import { BatchRowError } from '../errors/BatchRowError';
 import { SqlAbortError } from '../errors/SqlAbortError';
 import { SqlClientError } from '../errors/SqlClientError';
+import { tsql } from '../sql/fragment';
 import { t } from '../types/SqlParam';
 import { SqlClient } from './SqlClient';
 
@@ -1155,6 +1156,96 @@ describe('SqlClient', () => {
       expect(retries).toHaveBeenCalledWith(
         expect.objectContaining({ operation: 'transaction', number: 1205 }),
       );
+    });
+  });
+
+  describe('query with tagged templates', () => {
+    const useRealRequest = (): { realRequest: sql.Request; query: jest.SpyInstance } => {
+      const realRequest = new sql.Request();
+      const query = jest
+        .spyOn(realRequest, 'query')
+        .mockResolvedValue({ recordsets: [[{ id: 1 }]], rowsAffected: [1] } as never);
+
+      pool.request.mockReturnValue(realRequest);
+
+      return { realRequest, query };
+    };
+
+    it('parameterizes every value, expands arrays and types the rows', async () => {
+      const { realRequest, query } = useRealRequest();
+      const tenantId = 7;
+      const roles = ['admin', 'editor'];
+      const { rows } = await new SqlClient(config).query<{ id: number }>`
+        SELECT id FROM dbo.Users WHERE tenantId = ${tenantId} AND role IN (${roles})`;
+      const id: number | undefined = rows[0]?.id;
+
+      expect(id).toBe(1);
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('WHERE tenantId = @p0 AND role IN (@p1__0, @p1__1)'),
+      );
+      expect(Object.keys(realRequest.parameters)).toEqual(['p0', 'p1__0', 'p1__1']);
+    });
+
+    it('accepts a fragment with options', async () => {
+      useRealRequest();
+      const logger = jest.fn();
+
+      await new SqlClient(config).query(tsql`SELECT * FROM T WHERE id = ${t.int(5)}`, {
+        debug: logger,
+        timeout: 1_000,
+      });
+
+      expect(logger).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'query',
+          script: 'DECLARE @p0 int = 5;\nSELECT * FROM T WHERE id = @p0',
+        }),
+      );
+    });
+
+    it('emits events for tagged queries', async () => {
+      useRealRequest();
+      const success = jest.fn();
+
+      await new SqlClient(config).on('success', success).query`SELECT ${1} AS one`;
+
+      expect(success).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'query', sql: 'SELECT @p0 AS one' }),
+      );
+    });
+
+    it('still accepts text with named parameters', async () => {
+      const { query } = useRealRequest();
+
+      await new SqlClient(config).query('SELECT * FROM T WHERE id = @id', { id: 1 });
+
+      expect(query).toHaveBeenCalledWith('SELECT * FROM T WHERE id = @id');
+    });
+
+    it('rejects a quoted value before connecting', async () => {
+      const name = 'Ana';
+
+      await expect(
+        new SqlClient(config).query`SELECT * FROM T WHERE name = '${name}'`,
+      ).rejects.toThrow('ended up inside a string literal');
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
+    it('works inside transactions', async () => {
+      const realRequest = new sql.Request();
+
+      jest
+        .spyOn(realRequest, 'query')
+        .mockResolvedValue({ recordsets: [[{ n: 1 }]], rowsAffected: [1] } as never);
+      transaction.request.mockReturnValue(realRequest);
+
+      const rows = await new SqlClient(config).transaction(async (tx) => {
+        const result = await tx.query<{ n: number }>`SELECT ${1} AS n`;
+
+        return result.rows;
+      });
+
+      expect(rows).toEqual([{ n: 1 }]);
     });
   });
 });

@@ -42,6 +42,7 @@ export type {
 export type { Listener, SubscribeOptions } from './events/TypedEmitter';
 export { TypedEmitter } from './events/TypedEmitter';
 export type { SqlParams } from './sql/bindNamed';
+export { SqlFragment, SqlIdentifier, SqlRaw, tsql } from './sql/fragment';
 export type { Nullable, SqlLength } from './types/SqlParam';
 export { SqlParam, t } from './types/SqlParam';
 export { quoteIdentifier } from './utils/quoteIdentifier';
