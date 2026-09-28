@@ -2,8 +2,6 @@
 
 Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common Microsoft SQL Server tasks easier.
 
-> **Beta** — the API may change between releases. Install with `npm install @pilmee/mssql@beta`.
-
 - [Install](#install)
 - [Connect](#connect)
 - [Select / findOne](#select--findone) · [Where filters](#where-filters)
@@ -18,7 +16,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 ## Install
 
 ```bash
-npm install @pilmee/mssql@beta mssql
+npm install @pilmee/mssql mssql
 ```
 
 [`mssql`](https://www.npmjs.com/package/mssql) (v12) is a peer dependency, so your app and this library share the same driver and connection pools. npm 7+ installs it automatically if it is missing.
@@ -29,7 +27,7 @@ Also published to GitHub Packages as `@eljijuna/mssql`:
 # .npmrc
 @eljijuna:registry=https://npm.pkg.github.com
 
-npm install @eljijuna/mssql@beta mssql
+npm install @eljijuna/mssql mssql
 ```
 
 ## Connect

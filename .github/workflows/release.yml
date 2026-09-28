@@ -79,11 +79,16 @@ jobs:
           - [ ] README updated if a new helper was added
           - [x] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
           EOF
-          gh pr create \
+          # The release is already published at this point: a missing PR must not block the
+          # GitHub Packages and docs jobs. Creating it needs "Allow GitHub Actions to create and
+          # approve pull requests" (Settings → Actions → General).
+          if ! gh pr create \
             --title "chore(release): v${NEW_VERSION}" \
             --body-file /tmp/pr_body.md \
             --base "${GITHUB_REF_NAME}" \
-            --head "$BRANCH"
+            --head "$BRANCH"; then
+            echo "::warning::Could not open the changelog PR. Open it manually: https://github.com/${GITHUB_REPOSITORY}/pull/new/${BRANCH}"
+          fi
 
       - name: Generate documentation
         if: steps.release.outputs.new_release_published == 'true' && github.ref_name == 'main'
@@ -98,7 +103,8 @@ jobs:
   github-packages:
     name: Publish to GitHub Packages
     needs: release
-    if: needs.release.outputs.new_release_published == 'true'
+    # always(): publish even if a later step of the release job failed after npm published.
+    if: always() && needs.release.outputs.new_release_published == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -144,7 +150,7 @@ jobs:
   docs:
     name: Deploy documentation
     needs: release
-    if: needs.release.outputs.new_release_published == 'true' && github.ref_name == 'main'
+    if: always() && needs.release.outputs.new_release_published == 'true' && github.ref_name == 'main'
     runs-on: ubuntu-latest
     permissions:
       pages: write
