@@ -14,7 +14,8 @@ export type SqlOperation =
   | 'delete'
   | 'exec'
   | 'query'
-  | 'queryFile';
+  | 'queryFile'
+  | 'set';
 
 /**
  * A query about to be sent.

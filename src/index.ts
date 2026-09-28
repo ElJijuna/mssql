@@ -12,6 +12,8 @@ export type {
   TransactionOptions,
 } from './client/SqlTransaction';
 export type { FindOneOptions, SelectOptions, SqlOrderBy, SqlSortDirection } from './client/select';
+export type { SqlSetOptions, SqlSymmetricDifference, SqlUnion } from './client/set';
+export { SqlSet } from './client/set';
 export type { SqlWhere } from './client/statements';
 export type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './client/types';
 export type {

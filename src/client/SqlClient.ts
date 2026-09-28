@@ -50,6 +50,7 @@ import {
 } from './retry';
 import { type SqlIsolationLevel, SqlTransaction, type TransactionOptions } from './SqlTransaction';
 import type { FindOneOptions, SelectOptions } from './select';
+import { SqlSet, type SqlSetOptions } from './set';
 import type { SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './types';
 
@@ -702,6 +703,29 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
       {
         retryByDefault: false,
       },
+    );
+  }
+
+  /**
+   * A set of rows of `table` identified by `key`, to compare with a JavaScript list using the same
+   * operations as `Set` (`difference`, `intersection`, `union`, `symmetricDifference`,
+   * `isSubsetOf`, `isSupersetOf`, `isDisjointFrom`) plus `missing` (list items not in the table).
+   *
+   * The list can hold keys or objects and is sent as a single JSON parameter, so it isn't limited
+   * to 2100 values; the comparison runs in SQL Server and only the result comes back. Text keys
+   * follow the column's collation unless `caseSensitive` is set; `NULL` keys are ignored.
+   *
+   * @example
+   * ```ts
+   * const users = client.set<User>('dbo.Users', { key: 'email', where: { tenantId: 7 } });
+   *
+   * const toDeactivate = await users.difference(incoming);   // in the table, not in the list
+   * const toCreate = await users.missing(incoming);          // your items not in the table
+   * ```
+   */
+  public set<TRow extends object = SqlRow>(table: string, options: SqlSetOptions): SqlSet<TRow> {
+    return new SqlSet<TRow>(table, options, async (work, queryOptions) =>
+      this.call('set', queryOptions, work),
     );
   }
 

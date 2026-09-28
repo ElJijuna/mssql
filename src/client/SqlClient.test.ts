@@ -1248,4 +1248,51 @@ describe('SqlClient', () => {
       expect(rows).toEqual([{ n: 1 }]);
     });
   });
+
+  describe('set', () => {
+    it('loads key metadata once, sends the list as one JSON parameter and reports operation set', async () => {
+      const realRequest = (): sql.Request => new sql.Request();
+      const requests: sql.Request[] = [];
+      const logger = jest.fn();
+
+      pool.request.mockImplementation(() => {
+        const next = realRequest();
+        const catalog = requests.length === 0;
+
+        jest.spyOn(next, 'query').mockResolvedValue(
+          (catalog
+            ? {
+                recordset: [
+                  {
+                    name: 'email',
+                    type: 'nvarchar',
+                    precision: 0,
+                    scale: 0,
+                    collation: 'Latin1_General_CI_AS',
+                  },
+                ],
+              }
+            : { recordsets: [[{ i: 1 }]], rowsAffected: [1] }) as never,
+        );
+        requests.push(next);
+
+        return next;
+      });
+
+      const users = new SqlClient(config, { debug: logger }).set('dbo.Users', { key: 'email' });
+      const incoming = [{ email: 'a@x.com' }, { email: 'b@x.com' }];
+
+      await expect(users.missing(incoming)).resolves.toEqual([{ email: 'b@x.com' }]);
+      await users.missing(incoming);
+
+      expect(requests).toHaveLength(3);
+      expect(requests[1]?.parameters.__list?.value).toBe(
+        JSON.stringify([
+          { i: 0, k0: 'a@x.com' },
+          { i: 1, k0: 'b@x.com' },
+        ]),
+      );
+      expect(logger).toHaveBeenCalledWith(expect.objectContaining({ operation: 'set' }));
+    });
+  });
 });

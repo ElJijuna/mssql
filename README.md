@@ -4,7 +4,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 
 - [Install](#install)
 - [Connect](#connect)
-- [Select / findOne](#select--findone) · [Where filters](#where-filters)
+- [Select / findOne](#select--findone) · [Where filters](#where-filters) · [Set operations](#set-operations)
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
 - [Tagged template queries](#tagged-template-queries) · [Raw SQL and .sql files](#raw-sql-and-sql-files) · [Stored procedures](#stored-procedures) · [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
@@ -58,6 +58,7 @@ In every helper, values are sent as parameters and table/column names are bracke
 | --- | --- | --- |
 | `select(table, where?, options?)` | `SELECT … WHERE … ORDER BY … OFFSET` | rows |
 | `findOne(table, where?, options?)` | `SELECT TOP (1)` | row or `null` |
+| `set(table, { key }).difference(list)` … | `EXISTS` / `NOT EXISTS` against a JSON list | rows, your items or `boolean` |
 | `insert(table, row)` | `INSERT` | generated id |
 | `insertMany(table, rows, options?)` | `INSERT` per row, batched | `{ inserted, ids, failures }` |
 | `merge(table, rows, { on, ... })` | `UPDATE` if exists, else `INSERT` | `{ inserted, updated, skipped, actions, ids, failures }` |
@@ -113,6 +114,50 @@ Omit `where` to read every row. The generic types the rows (defaults to `Record<
 | `{ price: t.decimal(9.99, 10, 2) }` | `[price] = @p0` with an explicit type |
 
 For ranges, `LIKE`, `OR`, joins, etc., use [`query` / `queryFile`](#raw-sql-and-sql-files).
+
+## Set operations
+
+Compare a table with a list you already have — the `Set` methods of JavaScript, computed in SQL Server so the table is never downloaded to compare:
+
+```ts
+interface User { id: number; email: string; name: string }
+
+const incoming = [
+  { email: 'ana@x.com', name: 'Ana' },
+  { email: 'eva@x.com', name: 'Eva' },
+]; // objects or plain keys (['ana@x.com', …]); thousands are fine
+
+const users = client.set<User>('dbo.Users', { key: 'email', where: { tenantId: 7 } });
+
+await users.difference(incoming);          // User[]   in the table, not in the list  → e.g. deactivate
+await users.missing(incoming);             // your items not in the table            → e.g. create
+await users.intersection(incoming);        // User[]   in both                          → e.g. update
+await users.symmetricDifference(incoming); // { onlyInDb: User[], onlyInList: your items }
+await users.union(incoming);               // { inDb: User[], onlyInList: your items }
+await users.isSubsetOf(incoming);          // every table key is in the list
+await users.isSupersetOf(incoming);        // every list key is in the table
+await users.isDisjointFrom(incoming);      // no key in common
+```
+
+| Option | Description |
+| --- | --- |
+| `key` | Column(s) that identify an element: `'email'` or `['tenantId', 'code']` (then the list holds objects). |
+| `where` | Filter for the table side, same as [where filters](#where-filters). |
+| `columns`, `orderBy` | Columns and order of the returned rows. |
+| `caseSensitive` | Compare text exactly like JavaScript (see below). |
+
+- `difference`, `intersection` and `inDb` return **table rows**; `missing` and `onlyInList` return **your own list items** (objects included), in list order.
+- The list travels as **one JSON parameter** read with `OPENJSON`, so it isn't limited to 2100 values (tested with 20,000). Key types and collations are read from the table, so numbers, dates, `uniqueidentifier`s and `t.*` values compare correctly.
+- Each method accepts the usual options last: `users.missing(incoming, { timeout: 5_000 })`. Available on `tx` too.
+
+**Differences with JavaScript `Set`** — they follow SQL Server semantics:
+
+| | JavaScript `Set` | Here |
+| --- | --- | --- |
+| Upper/lower case | `'Ana' !== 'ana'` | Follows the column collation, usually case-insensitive. `caseSensitive: true` compares exactly (can't use indexes). |
+| Trailing spaces | `'a' !== 'a '` | Ignored, as in any SQL Server comparison. |
+| `null` / `undefined` keys | an element like any other | Ignored on both sides: `NULL` never matches. |
+| Duplicated keys in the list | kept once | `missing` returns the first occurrence per key. |
 
 ## Insert
 
@@ -549,7 +594,7 @@ Retrying is only done where running the work again is safe:
 
 | Call | Retried by default | What is retried |
 | --- | --- | --- |
-| `select`, `findOne`, `insert`, `update`, `delete` | yes | the call (a single statement: a deadlock already rolled it back) |
+| `select`, `findOne`, `insert`, `update`, `delete`, `set(…)` methods | yes | the call (a single statement: a deadlock already rolled it back) |
 | `insertMany` / `merge` with `onError: 'rollback'` | yes | the whole call (all or nothing) |
 | `insertMany` / `merge` with `onError: 'continue'` | yes | only the rows that failed with a transient error; rows already saved are never repeated |
 | `exec`, `query`, `queryFile` | **no**, pass `retry: true` | the call — only opt in when the SQL is safe to run twice |
@@ -650,7 +695,7 @@ const client = new SqlClient(config, {
 
 | Field | Content |
 | --- | --- |
-| `operation` | `select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`, `query` or `queryFile` |
+| `operation` | `select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`, `query`, `queryFile` or `set` |
 | `sql` | SQL text exactly as sent, with `@p0`, `@p1`… placeholders |
 | `params` | `[{ name, type, value }]`, e.g. `{ name: 'p0', type: 'nvarchar(100)', value: 'Ana' }` |
 | `script` | `DECLARE` per parameter + the SQL, ready to run |

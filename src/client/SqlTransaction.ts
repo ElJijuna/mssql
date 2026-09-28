@@ -34,6 +34,7 @@ import {
 } from './query';
 import type { RetryOption } from './retry';
 import type { FindOneOptions, SelectOptions } from './select';
+import { SqlSet, type SqlSetOptions } from './set';
 import type { SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlRow } from './types';
 
@@ -221,6 +222,13 @@ export class SqlTransaction {
     options: RawQueryOptions = {},
   ): Promise<QueryResult<TRow>> {
     return this.enqueue(async () => queryFileCommand<TRow>(this.context, file, params, options));
+  }
+
+  /** Transaction version of {@link SqlClient.set}. */
+  public set<TRow extends object = SqlRow>(table: string, options: SqlSetOptions): SqlSet<TRow> {
+    return new SqlSet<TRow>(table, options, async (work, queryOptions) =>
+      this.enqueue(async () => work(this.context, queryOptions)),
+    );
   }
 
   /**
