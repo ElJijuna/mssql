@@ -1,6 +1,6 @@
 {
     "name": "@pilmee/mssql",
-    "version": "1.0.0-beta.1",
+    "version": "1.0.0",
     "description": "Helpers on top of mssql to make common Microsoft SQL Server tasks easier",
     "homepage": "https://github.com/ElJijuna/mssql#readme",
     "bugs": {
