@@ -1,6 +1,164 @@
 import sql from 'mssql';
 import { SqlPrecisionError } from '../errors/SqlPrecisionError';
-import { bindInput, SqlParam, t } from './SqlParam';
+import { bindInput, SqlExactDecimal, SqlParam, t } from './SqlParam';
+
+describe('complete parameter contract', () => {
+  const date = new Date('2026-01-02T03:04:05.000Z');
+  const bytes = Buffer.from([0, 255]);
+
+  it.each([
+    ['bit', () => t.bit(true), sql.Bit(), true],
+    ['tinyint', () => t.tinyint(255), sql.TinyInt(), 255],
+    ['smallint', () => t.smallint(-32768), sql.SmallInt(), -32768],
+    ['int', () => t.int(42), sql.Int(), 42],
+    ['bigint', () => t.bigint(42), sql.BigInt(), 42],
+    ['decimal', () => t.decimal('123.45', 12, 2), sql.Decimal(12, 2), '123.45'],
+    ['numeric', () => t.numeric('123.45', 12, 2), sql.Numeric(12, 2), '123.45'],
+    ['money', () => t.money(19.99), sql.Money(), 19.99],
+    ['smallmoney', () => t.smallmoney(-19.99), sql.SmallMoney(), -19.99],
+    ['float', () => t.float(1.25), sql.Float(), 1.25],
+    ['real', () => t.real(1.25), sql.Real(), 1.25],
+    ['char', () => t.char('A', 8), sql.Char(8), 'A'],
+    ['nchar', () => t.nchar('ñ', 8), sql.NChar(8), 'ñ'],
+    ['varchar', () => t.varchar('hello', 100), sql.VarChar(100), 'hello'],
+    ['nvarchar', () => t.nvarchar('你好', 100), sql.NVarChar(100), '你好'],
+    ['binary', () => t.binary(bytes, 2), { type: sql.Binary, length: 2 }, bytes],
+    ['varbinary', () => t.varbinary(bytes, 2), sql.VarBinary(2), bytes],
+    ['date', () => t.date(date), sql.Date(), date],
+    ['time', () => t.time('03:04:05', 3), sql.Time(3), '03:04:05'],
+    ['datetime', () => t.datetime(date), sql.DateTime(), date],
+    ['datetime2', () => t.datetime2(date, 3), sql.DateTime2(3), date],
+    [
+      'datetimeoffset',
+      () => t.datetimeoffset('2026-01-02T03:04:05+02:00', 3),
+      sql.DateTimeOffset(3),
+      '2026-01-02T03:04:05+02:00',
+    ],
+    ['smalldatetime', () => t.smalldatetime(date), sql.SmallDateTime(), date],
+    [
+      'uniqueidentifier',
+      () => t.uniqueidentifier('8bd29468-3a54-48a4-906d-921b8f5c8b85'),
+      sql.UniqueIdentifier(),
+      '8bd29468-3a54-48a4-906d-921b8f5c8b85',
+    ],
+    ['xml', () => t.xml('<root/>'), sql.Xml(), '<root/>'],
+  ] satisfies Array<[string, () => SqlParam, sql.ISqlType & { length?: number }, unknown]>)(
+    'preserves %s values and SQL dimensions',
+    (_name, build, type, value) => {
+      const parameter = build();
+
+      expect(parameter).toBeInstanceOf(SqlParam);
+      expect(parameter.type).toEqual(type);
+      expect(parameter.value).toBe(value);
+    },
+  );
+
+  it('keeps NULL across every builder family', () => {
+    const parameters = [
+      t.bit(null),
+      t.tinyint(null),
+      t.smallint(null),
+      t.int(null),
+      t.bigint(null),
+      t.decimal(null),
+      t.numeric(null),
+      t.money(null),
+      t.smallmoney(null),
+      t.float(null),
+      t.real(null),
+      t.char(null, 1),
+      t.nchar(null, 1),
+      t.varchar(null, 'max'),
+      t.nvarchar(null, 'max'),
+      t.binary(null, 1),
+      t.varbinary(null, 'max'),
+      t.date(null),
+      t.time(null),
+      t.datetime(null),
+      t.datetime2(null),
+      t.datetimeoffset(null),
+      t.smalldatetime(null),
+      t.uniqueidentifier(null),
+      t.xml(null),
+      t.decimalExact(null),
+      t.numericExact(null),
+    ];
+
+    expect(parameters.every((parameter) => parameter.value === null)).toBe(true);
+  });
+
+  it('uses the documented default dimensions', () => {
+    expect(t.decimal(1).type).toEqual(sql.Decimal(18, 0));
+    expect(t.numeric(1).type).toEqual(sql.Numeric(18, 0));
+    expect(t.decimalExact('1')).toMatchObject({ precision: 18, scale: 0, kind: 'decimal' });
+    expect(t.numericExact('1')).toMatchObject({ precision: 18, scale: 0, kind: 'numeric' });
+    expect(t.time(date).type).toEqual(sql.Time(7));
+    expect(t.datetime2(date).type).toEqual(sql.DateTime2(7));
+    expect(t.datetimeoffset(date).type).toEqual(sql.DateTimeOffset(7));
+    expect(t.varchar('text', 'max').type).toEqual(sql.VarChar(sql.MAX));
+  });
+
+  it.each([
+    [0, 0],
+    [1.5, 0],
+    [38, -1],
+    [38, 1.5],
+    [NaN, 0],
+    [38, Infinity],
+  ])('rejects invalid precision %s / scale %s', (precision, scale) => {
+    expect(() => t.decimalExact('0', precision, scale)).toThrow(SqlPrecisionError);
+  });
+
+  it.each(['', ' 1', '1 ', '.1', '1.', 'NaN', 'Infinity', '--1', '1; DROP TABLE Users'])(
+    'rejects invalid exact decimal text %p',
+    (value) => {
+      expect(() => t.numericExact(value, 38, 18)).toThrow(SqlPrecisionError);
+    },
+  );
+
+  it('rejects invalid runtime decimal types and kinds', () => {
+    expect(() => t.decimalExact(1 as unknown as string)).toThrow(SqlPrecisionError);
+    expect(() => new SqlExactDecimal('1', 'float' as 'decimal', 10, 0)).toThrow(SqlPrecisionError);
+  });
+
+  it('accepts signs, leading zeroes, and exact boundaries', () => {
+    expect(t.decimalExact('-000.12', 2, 2).value).toBe('-000.12');
+    expect(t.numericExact('+999', 3, 0).value).toBe('+999');
+    expect(t.decimalExact('0', 1, 1).value).toBe('0');
+    expect(t.decimalExact('9'.repeat(38), 38, 0).value).toBe('9'.repeat(38));
+    expect(t.bigint('+00042').value).toBe('42');
+    expect(t.bigint(Number.MIN_SAFE_INTEGER).value).toBe(Number.MIN_SAFE_INTEGER);
+    expect(t.bigint(Number.MAX_SAFE_INTEGER).value).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('preserves ordinary references and NULL bindings', () => {
+    const request = new sql.Request();
+
+    expect(bindInput(request, 'value', t.bigint(null))).toBe('@value');
+    expect(request.parameters.value?.value).toBeNull();
+    expect(bindInput(request, 'plain', null)).toBe('@plain');
+    expect(request.parameters.plain?.value).toBeNull();
+    expect(bindInput(request, 'amount', t.numericExact(null, 12, 2))).toBe(
+      'CONVERT(numeric(12, 2), @amount)',
+    );
+    expect(request.parameters.amount?.value).toBeNull();
+  });
+
+  it('rejects an out-of-range native bigint before binding', () => {
+    const request = new sql.Request();
+
+    expect(() => bindInput(request, 'id', 9223372036854775808n)).toThrow(SqlPrecisionError);
+    expect(request.parameters).toEqual({});
+  });
+
+  it('preserves driver errors when binding fails', () => {
+    const request = new sql.Request();
+
+    bindInput(request, 'id', t.int(1));
+
+    expect(() => bindInput(request, 'id', t.int(2))).toThrow('already been declared');
+  });
+});
 
 describe('t builders', () => {
   it('builds a type without dimensions', () => {

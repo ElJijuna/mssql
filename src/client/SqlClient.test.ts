@@ -189,6 +189,180 @@ describe('SqlClient', () => {
     it('does nothing on close when not connected', async () => {
       await expect(new SqlClient(config).close()).resolves.toBeUndefined();
     });
+
+    it('normalizes pool-close failures and permits opening a new pool afterwards', async () => {
+      const cause = Object.assign(new Error('close failed'), { code: 'ECLOSE' });
+      const closed = jest.fn();
+      const client = new SqlClient(config).on('close', closed);
+
+      pool.close.mockRejectedValueOnce(cause);
+      await client.connect();
+
+      await expect(client.close()).rejects.toMatchObject({
+        code: 'SQL_QUERY_ERROR',
+        driverCode: 'ECLOSE',
+        operation: 'close',
+        cause,
+      });
+      expect(closed).not.toHaveBeenCalled();
+      await expect(client.connect()).resolves.toBe(pool);
+      await client.close();
+      expect(ConnectionPoolMock).toHaveBeenCalledTimes(2);
+      expect(pool.close).toHaveBeenCalledTimes(2);
+      expect(closed).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for an in-flight connection before closing the owned pool', async () => {
+      let finishConnection: (value: typeof pool) => void = () => undefined;
+
+      pool.connect.mockImplementationOnce(
+        () =>
+          new Promise<typeof pool>((resolve) => {
+            finishConnection = resolve;
+          }),
+      );
+      const client = new SqlClient(config);
+      const connecting = client.connect();
+      const closing = client.close();
+
+      expect(pool.close).not.toHaveBeenCalled();
+      finishConnection(pool);
+
+      await expect(connecting).resolves.toBe(pool);
+      await closing;
+      expect(pool.close).toHaveBeenCalledTimes(1);
+      expect(ConnectionPoolMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('can leave a configuration-created pool under application shutdown control', async () => {
+      const client = new SqlClient(config, { ownsPool: false });
+      const shared = await client.connect();
+
+      await client.close();
+
+      expect(pool.close).not.toHaveBeenCalled();
+      await shared.close();
+      expect(pool.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not close or emit a close event after connection failure', async () => {
+      const closed = jest.fn();
+      const client = new SqlClient(config).on('close', closed);
+
+      pool.connect.mockRejectedValueOnce(new Error('offline'));
+      await expect(client.connect()).rejects.toMatchObject({ code: 'SQL_CONNECTION_ERROR' });
+      await client.close();
+      expect(pool.close).not.toHaveBeenCalled();
+      expect(closed).not.toHaveBeenCalled();
+    });
+
+    it('preserves connection metadata when a raw-query helper cannot connect', async () => {
+      const cause = Object.assign(new Error('login failed'), { code: 'ELOGIN', number: 18456 });
+
+      pool.connect.mockRejectedValueOnce(cause);
+
+      await expect(new SqlClient(config).query('SELECT 1')).rejects.toMatchObject({
+        code: 'SQL_CONNECTION_ERROR',
+        driverCode: 'ELOGIN',
+        number: 18456,
+        operation: 'connect',
+        cause,
+      });
+      expect(request.query).not.toHaveBeenCalled();
+      expect(pool.connect).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('transaction lifecycle failures', () => {
+    it('normalizes a begin failure without invoking the callback or emitting a begin event', async () => {
+      const cause = Object.assign(new Error('begin failed'), { code: 'EREQUEST', number: 3951 });
+      const work = jest.fn<Promise<string>, [unknown]>().mockResolvedValue('ok');
+      const begin = jest.fn();
+      const rollback = jest.fn();
+      const client = new SqlClient(config)
+        .on('transactionBegin', begin)
+        .on('transactionRollback', rollback);
+
+      transaction.begin.mockRejectedValueOnce(cause);
+
+      await expect(client.transaction(work)).rejects.toMatchObject({
+        code: 'SQL_QUERY_ERROR',
+        driverCode: 'EREQUEST',
+        number: 3951,
+        operation: 'transaction',
+        cause,
+      });
+      expect(work).not.toHaveBeenCalled();
+      expect(begin).not.toHaveBeenCalled();
+      expect(rollback).not.toHaveBeenCalled();
+      expect(transaction.commit).not.toHaveBeenCalled();
+      expect(transaction.rollback).not.toHaveBeenCalled();
+    });
+
+    it('retries a transient begin failure and invokes the work only after begin succeeds', async () => {
+      const cause = Object.assign(new Error('deadlock'), { code: 'EREQUEST', number: 1205 });
+      const work = jest.fn<Promise<string>, [unknown]>().mockResolvedValue('ok');
+      const retries = jest.fn();
+      const begin = jest.fn();
+      const client = new SqlClient(config, { retry: { attempts: 1, delay: 0 } })
+        .on('retry', retries)
+        .on('transactionBegin', begin);
+
+      transaction.begin.mockRejectedValueOnce(cause);
+
+      await expect(client.transaction(work, { retry: true })).resolves.toBe('ok');
+      expect(transaction.begin).toHaveBeenCalledTimes(2);
+      expect(work).toHaveBeenCalledTimes(1);
+      expect(begin).toHaveBeenCalledWith({ transactionId: 2 });
+      expect(transaction.commit).toHaveBeenCalledTimes(1);
+      expect(retries).toHaveBeenCalledWith(
+        expect.objectContaining({ operation: 'transaction', number: 1205, attempt: 1 }),
+      );
+    });
+
+    it('retries the whole callback after a transient commit failure and gives each attempt its own id', async () => {
+      const cause = Object.assign(new Error('deadlock at commit'), { number: 1205 });
+      const work = jest.fn<Promise<string>, [unknown]>().mockResolvedValue('ok');
+      const events: string[] = [];
+      const client = new SqlClient(config, { retry: { attempts: 1, delay: 0 } })
+        .on('transactionBegin', ({ transactionId }) => events.push(`begin ${transactionId}`))
+        .on('transactionRollback', ({ transactionId }) => events.push(`rollback ${transactionId}`))
+        .on('transactionCommit', ({ transactionId }) => events.push(`commit ${transactionId}`));
+
+      transaction.commit.mockRejectedValueOnce(cause);
+
+      await expect(client.transaction(work, { retry: true })).resolves.toBe('ok');
+      expect(work).toHaveBeenCalledTimes(2);
+      expect(transaction.rollback).toHaveBeenCalledTimes(1);
+      expect(events).toEqual(['begin 1', 'rollback 1', 'begin 2', 'commit 2']);
+    });
+
+    it('preserves callback errors even when rollback fails', async () => {
+      const failure = new Error('business rule');
+      const rollback = jest.fn();
+      const client = new SqlClient(config).on('transactionRollback', rollback);
+
+      transaction.rollback.mockRejectedValueOnce(new Error('already rolled back'));
+
+      await expect(client.transaction(() => Promise.reject(failure))).rejects.toBe(failure);
+      expect(rollback).toHaveBeenCalledWith(expect.objectContaining({ error: failure }));
+      expect(transaction.commit).not.toHaveBeenCalled();
+    });
+
+    it('rejects an already aborted transaction before connecting or running its callback', async () => {
+      const work = jest.fn<Promise<string>, [unknown]>().mockResolvedValue('ok');
+      const reason = new Error('stop');
+
+      await expect(
+        new SqlClient(config).transaction(work, { signal: AbortSignal.abort(reason), retry: true }),
+      ).rejects.toMatchObject({
+        code: 'SQL_ABORT_ERROR',
+        operation: 'transaction',
+        cause: reason,
+      });
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+      expect(work).not.toHaveBeenCalled();
+    });
   });
 
   describe('insert', () => {
@@ -738,6 +912,10 @@ describe('SqlClient', () => {
   });
 
   describe('findOne', () => {
+    it('finds the first row without filters and with default options', async () => {
+      await expect(new SqlClient(config).findOne('Users')).resolves.toEqual({ id: 42 });
+      expect(request.query).toHaveBeenCalledWith('SELECT TOP (1) * FROM [Users];');
+    });
     it('returns the first row with TOP (1)', async () => {
       request.query.mockResolvedValue({ recordset: [{ id: 1 }], rowsAffected: [1] });
 
@@ -1149,6 +1327,38 @@ describe('SqlClient', () => {
   describe('retry', () => {
     const deadlock = () => Object.assign(new Error('Transaction was deadlocked'), { number: 1205 });
     const fast = { retry: { delay: 1 } };
+
+    it('normalizes binding failures before consulting a custom retry predicate', async () => {
+      const cause = Object.assign(new Error('parameter binding failed'), { code: 'EPARAM' });
+      const shouldRetry = jest.fn(() => true);
+      const client = new SqlClient(config, { retry: { attempts: 1, delay: 0, shouldRetry } });
+
+      request.input.mockImplementationOnce(() => {
+        throw cause;
+      });
+
+      await expect(client.select('Users', { id: 7 })).resolves.toEqual([{ id: 42 }]);
+      expect(shouldRetry).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 'SQL_QUERY_ERROR',
+          driverCode: 'EPARAM',
+          operation: 'select',
+          cause,
+        }),
+        1,
+      );
+      expect(request.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects invalid retry configuration before connecting', async () => {
+      await expect(
+        new SqlClient(config, { retry: { attempts: -1 } }).select('Users'),
+      ).rejects.toMatchObject({
+        code: 'SQL_CLIENT_ERROR',
+        operation: 'select',
+      });
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
 
     it('retries a transient error and emits retry events', async () => {
       const retries = jest.fn();
