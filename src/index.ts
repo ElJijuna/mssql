@@ -1,6 +1,7 @@
 export type { BatchOnError, BatchOptions, RowAction, RowFailure } from './client/batch';
 export type { ExecOptions, ExecOutput, ExecOutputValues, ExecResult } from './client/exec';
 export type { MergeOptions } from './client/merge';
+export type { PageOptions, SqlCursor, SqlPage } from './client/page';
 export type { QueryResult, RawQueryOptions } from './client/query';
 export type { RetryOption, RetryOptions } from './client/retry';
 export { TRANSIENT_ERROR_NUMBERS } from './client/retry';

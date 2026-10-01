@@ -72,6 +72,29 @@ describe('SqlClient', () => {
     ConnectionPoolMock.mockReset().mockImplementation(() => pool);
   });
 
+  it('pages through client and transaction helpers with page events', async () => {
+    request.query.mockResolvedValue({ recordset: [{ id: 1 }, { id: 2 }] });
+    const client = new SqlClient(config);
+    const listener = jest.fn();
+
+    client.on('query', listener);
+
+    const first = await client.page('Users', { orderBy: 'id', key: 'id', limit: 1 });
+    const second = await client.transaction(async (tx) =>
+      tx.page('Users', {
+        orderBy: 'id',
+        key: 'id',
+        limit: 1,
+        after: first.nextCursor ?? undefined,
+      }),
+    );
+
+    expect(first.nextCursor?.values).toEqual([1]);
+    expect(second.hasMore).toBe(true);
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({ operation: 'page' }));
+    expect(transaction.request).toHaveBeenCalledTimes(1);
+  });
+
   describe('connection', () => {
     const externalPool = (): sql.ConnectionPool => pool as unknown as sql.ConnectionPool;
 

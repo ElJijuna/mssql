@@ -923,3 +923,46 @@ They use the `pilmee_mssql_test` database (created automatically). Point them at
 ## License
 
 MIT
+
+### Cursor pagination
+
+Use `page` for forward pagination without growing `OFFSET` costs. Declare a unique,
+non-null key; missing key columns are appended to the ordering ascending. Composite
+keys and mixed ascending/descending orders are supported, including SQL Server's
+null ordering. Add an index matching the filters and ordering for efficient seeks.
+
+```ts
+const first = await client.page('dbo.Events', {
+  where: { tenantId: 7 },
+  orderBy: { sequence: 'desc' },
+  key: 'id',
+  limit: 50,
+});
+
+if (first.hasMore) {
+  const next = await client.page('dbo.Events', {
+    where: { tenantId: 7 },
+    orderBy: { sequence: 'desc' },
+    key: 'id',
+    limit: 50,
+    after: first.nextCursor!,
+  });
+}
+```
+
+Returns `{ rows, hasMore, nextCursor }`. The default limit is 50. One extra row is
+fetched to detect another page; `nextCursor` is null on the final or empty page.
+`tx.page` uses the same API. Debugging, events (`operation: 'page'`), cancellation,
+timeouts and the client's configured read retries apply.
+
+Keep the table, filters and ordering unchanged when continuing. The cursor is an
+in-memory object, not an authenticated transport token: validate any cursor supplied
+by an API consumer, and preserve value types (including Date and Buffer) when
+serializing it. Projection must include every ordering column; use unqualified column
+names. The library cannot verify that the declared key is unique in the database.
+
+Ordering values must round-trip exactly through the driver. Prefer integer or other
+losslessly represented columns; avoid high-precision decimal and sub-millisecond
+`datetime2` ordering values that the driver rounds. Cursor pagination does not provide
+a snapshot across calls: updates to ordering values can move rows between pages.
+Use an appropriate transaction isolation level when a consistent snapshot is required.

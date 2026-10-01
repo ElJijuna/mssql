@@ -5,6 +5,7 @@ import type { SqlDebugParam } from '../debug/debug';
  * Helper that produced a query.
  */
 export type SqlOperation =
+  | 'page'
   | 'select'
   | 'findOne'
   | 'insert'

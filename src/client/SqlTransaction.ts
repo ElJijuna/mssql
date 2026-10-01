@@ -26,6 +26,7 @@ import {
   execCommand,
 } from './exec';
 import type { MergeOptions } from './merge';
+import { type PageOptions, pageCommand, type SqlPage } from './page';
 import {
   normalizeQuery,
   type QueryInput,
@@ -136,6 +137,14 @@ export class SqlTransaction {
     return this.enqueue('select', async () =>
       selectCommand<TRow>(this.context, table, where, options),
     );
+  }
+
+  /** Read a forward cursor page with an explicit unique tie-breaker. */
+  public async page<TRow extends object = SqlRow>(
+    table: string,
+    options: PageOptions,
+  ): Promise<SqlPage<TRow>> {
+    return this.enqueue('page', async () => pageCommand<TRow>(this.context, table, options));
   }
 
   /** Transaction version of {@link SqlClient.findOne}. */

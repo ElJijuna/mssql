@@ -34,6 +34,7 @@ import {
   execCommand,
 } from './exec';
 import type { MergeOptions } from './merge';
+import { type PageOptions, pageCommand, type SqlPage } from './page';
 import {
   normalizeQuery,
   type QueryInput,
@@ -483,6 +484,16 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   ): Promise<TRow[]> {
     return this.call('select', options, async (ctx, o) =>
       selectCommand<TRow>(ctx, table, where, o),
+    );
+  }
+
+  /** Read a forward cursor page with an explicit unique tie-breaker. */
+  public async page<TRow extends object = SqlRow>(
+    table: string,
+    options: PageOptions,
+  ): Promise<SqlPage<TRow>> {
+    return this.call('page', options, async (ctx, resolved) =>
+      pageCommand<TRow>(ctx, table, resolved),
     );
   }
 
