@@ -5,6 +5,7 @@ export type { PageOptions, SqlCursor, SqlPage } from './client/page';
 export type { QueryResult, RawQueryOptions } from './client/query';
 export type { RetryOption, RetryOptions } from './client/retry';
 export { TRANSIENT_ERROR_NUMBERS } from './client/retry';
+export type { ReturningOptions } from './client/returning';
 export type { SqlClientOptions } from './client/SqlClient';
 export { SqlClient } from './client/SqlClient';
 export type {

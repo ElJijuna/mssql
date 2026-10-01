@@ -51,6 +51,7 @@ import {
   resolveRetry,
   retryDelay,
 } from './retry';
+import type { ReturningOptions } from './returning';
 import { type SqlIsolationLevel, SqlTransaction, type TransactionOptions } from './SqlTransaction';
 import type { FindOneOptions, SelectOptions } from './select';
 import { SqlSet, type SqlSetOptions } from './set';
@@ -537,11 +538,21 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    *   email: 'ana@example.com',
    * });
    */
+  public async insert<TRow extends object = SqlRow>(
+    table: string,
+    row: SqlRow,
+    options: ReturningOptions,
+  ): Promise<TRow[]>;
   public async insert(
     table: string,
     row: SqlRow,
-    options: QueryOptions = {},
-  ): Promise<SqlIdentity | null> {
+    options?: QueryOptions,
+  ): Promise<SqlIdentity | null>;
+  public async insert(
+    table: string,
+    row: SqlRow,
+    options: QueryOptions | ReturningOptions = {},
+  ): Promise<SqlIdentity | null | SqlRow[]> {
     return this.call('insert', options, async (ctx, o) => insertCommand(ctx, table, row, o));
   }
 
@@ -627,12 +638,24 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * @example
    * await client.update('dbo.Users', { name: 'Ana María' }, { id: 42 }); // → 1
    */
+  public async update<TRow extends object = SqlRow>(
+    table: string,
+    values: SqlRow,
+    where: SqlWhere,
+    options: ReturningOptions,
+  ): Promise<TRow[]>;
   public async update(
     table: string,
     values: SqlRow,
     where: SqlWhere,
-    options: QueryOptions = {},
-  ): Promise<number> {
+    options?: QueryOptions,
+  ): Promise<number>;
+  public async update(
+    table: string,
+    values: SqlRow,
+    where: SqlWhere,
+    options: QueryOptions | ReturningOptions = {},
+  ): Promise<number | SqlRow[]> {
     return this.call('update', options, async (ctx, o) =>
       updateCommand(ctx, table, values, where, o),
     );
@@ -652,7 +675,17 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * @example
    * await client.delete('dbo.Sessions', { userId: 42 }); // → 3
    */
-  public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
+  public async delete<TRow extends object = SqlRow>(
+    table: string,
+    where: SqlWhere,
+    options: ReturningOptions,
+  ): Promise<TRow[]>;
+  public async delete(table: string, where: SqlWhere, options?: QueryOptions): Promise<number>;
+  public async delete(
+    table: string,
+    where: SqlWhere,
+    options: QueryOptions | ReturningOptions = {},
+  ): Promise<number | SqlRow[]> {
     return this.call('delete', options, async (ctx, o) => deleteCommand(ctx, table, where, o));
   }
 

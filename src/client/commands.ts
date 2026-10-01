@@ -16,6 +16,7 @@ import {
   track,
 } from './batch';
 import { buildMergeStatement, type MergeOptions, missingKey, normalizeKeys } from './merge';
+import { outputClause, type ReturningOptions } from './returning';
 import { buildSelect, type FindOneOptions, type SelectOptions } from './select';
 import { bindRow, bindWhere, buildInsertStatement, type SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlRow } from './types';
@@ -89,15 +90,21 @@ export const insertCommand = async (
   ctx: CommandContext,
   table: string,
   row: SqlRow,
-  options: QueryOptions,
-): Promise<SqlIdentity | null> => {
+  options: QueryOptions | ReturningOptions,
+): Promise<SqlIdentity | null | SqlRow[]> => {
   const query = ctx.runner('insert', options);
   const request = await ctx.request();
-  const insert = buildInsertStatement(quoteIdentifier(table), row, request);
+  const output = 'returning' in options ? outputClause('INSERTED', options.returning) : '';
+  const insert = buildInsertStatement(quoteIdentifier(table), row, request, 0, output);
   const result = await query(
     request,
-    `${insert} SELECT CONVERT(varchar(40), SCOPE_IDENTITY()) AS id;`,
+    output ? insert : `${insert} SELECT CONVERT(varchar(40), SCOPE_IDENTITY()) AS id;`,
   );
+
+  if ('returning' in options) {
+    return result.recordset;
+  }
+
   const id = result.recordset[0]?.id;
 
   return parseIdentity(id);
@@ -192,14 +199,15 @@ export const updateCommand = async (
   table: string,
   values: SqlRow,
   where: SqlWhere,
-  options: QueryOptions,
-): Promise<number> => {
+  options: QueryOptions | ReturningOptions,
+): Promise<number | SqlRow[]> => {
   requireWhere('update', where);
 
   if (Object.keys(values).length === 0) {
     throw new SqlClientError('update requires at least one column to set');
   }
 
+  const output = 'returning' in options ? outputClause('INSERTED', options.returning) : '';
   const query = ctx.runner('update', options);
   const request = await ctx.request();
   const set = bindRow(values, request, 0);
@@ -207,10 +215,10 @@ export const updateCommand = async (
   const assignments = [...set].map(([column, param]) => `${quoteIdentifier(column)} = ${param}`);
   const result = await query(
     request,
-    `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')} WHERE ${predicate};`,
+    `UPDATE ${quoteIdentifier(table)} SET ${assignments.join(', ')}${output} WHERE ${predicate};`,
   );
 
-  return result.rowsAffected[0] ?? 0;
+  return 'returning' in options ? result.recordset : (result.rowsAffected[0] ?? 0);
 };
 
 /**
@@ -220,16 +228,20 @@ export const deleteCommand = async (
   ctx: CommandContext,
   table: string,
   where: SqlWhere,
-  options: QueryOptions,
-): Promise<number> => {
+  options: QueryOptions | ReturningOptions,
+): Promise<number | SqlRow[]> => {
   requireWhere('delete', where);
 
+  const output = 'returning' in options ? outputClause('DELETED', options.returning) : '';
   const query = ctx.runner('delete', options);
   const request = await ctx.request();
   const { predicate } = bindWhere(where, request, 0);
-  const result = await query(request, `DELETE FROM ${quoteIdentifier(table)} WHERE ${predicate};`);
+  const result = await query(
+    request,
+    `DELETE FROM ${quoteIdentifier(table)}${output} WHERE ${predicate};`,
+  );
 
-  return result.rowsAffected[0] ?? 0;
+  return 'returning' in options ? result.recordset : (result.rowsAffected[0] ?? 0);
 };
 
 /**

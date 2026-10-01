@@ -95,6 +95,30 @@ describe('SqlClient', () => {
     expect(transaction.request).toHaveBeenCalledTimes(1);
   });
 
+  it('returns typed written rows from the client and transaction', async () => {
+    const client = new SqlClient(config);
+    const rows = await client.insert<{ id: number }>(
+      'Users',
+      { name: 'Ana' },
+      { returning: ['id'] },
+    );
+
+    expect(rows[0]?.id).toBe(42);
+
+    await client.transaction(async (tx) => {
+      expect(await tx.insert('Users', {}, { returning: true })).toEqual([{ id: 42 }]);
+      expect(await tx.update('Users', { name: 'Ana' }, { id: 42 }, { returning: true })).toEqual([
+        { id: 42 },
+      ]);
+      expect(await tx.delete('Users', { id: 42 }, { returning: true })).toEqual([{ id: 42 }]);
+    });
+
+    expect(
+      await client.update('Users', { name: 'Ana' }, { id: 42 }, { returning: ['id'] }),
+    ).toEqual([{ id: 42 }]);
+    expect(await client.delete('Users', { id: 42 }, { returning: true })).toEqual([{ id: 42 }]);
+  });
+
   describe('connection', () => {
     const externalPool = (): sql.ConnectionPool => pool as unknown as sql.ConnectionPool;
 

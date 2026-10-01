@@ -36,6 +36,7 @@ import {
   type RawQueryOptions,
 } from './query';
 import type { RetryOption } from './retry';
+import type { ReturningOptions } from './returning';
 import type { FindOneOptions, SelectOptions } from './select';
 import { SqlSet, type SqlSetOptions } from './set';
 import type { SqlWhere } from './statements';
@@ -159,11 +160,21 @@ export class SqlTransaction {
   }
 
   /** Transaction version of {@link SqlClient.insert}. */
+  public async insert<TRow extends object = SqlRow>(
+    table: string,
+    row: SqlRow,
+    options: ReturningOptions,
+  ): Promise<TRow[]>;
   public async insert(
     table: string,
     row: SqlRow,
-    options: QueryOptions = {},
-  ): Promise<SqlIdentity | null> {
+    options?: QueryOptions,
+  ): Promise<SqlIdentity | null>;
+  public async insert(
+    table: string,
+    row: SqlRow,
+    options: QueryOptions | ReturningOptions = {},
+  ): Promise<SqlIdentity | null | SqlRow[]> {
     return this.enqueue('insert', async () => insertCommand(this.context, table, row, options));
   }
 
@@ -184,19 +195,41 @@ export class SqlTransaction {
   }
 
   /** Transaction version of {@link SqlClient.update}. */
+  public async update<TRow extends object = SqlRow>(
+    table: string,
+    values: SqlRow,
+    where: SqlWhere,
+    options: ReturningOptions,
+  ): Promise<TRow[]>;
   public async update(
     table: string,
     values: SqlRow,
     where: SqlWhere,
-    options: QueryOptions = {},
-  ): Promise<number> {
+    options?: QueryOptions,
+  ): Promise<number>;
+  public async update(
+    table: string,
+    values: SqlRow,
+    where: SqlWhere,
+    options: QueryOptions | ReturningOptions = {},
+  ): Promise<number | SqlRow[]> {
     return this.enqueue('update', async () =>
       updateCommand(this.context, table, values, where, options),
     );
   }
 
   /** Transaction version of {@link SqlClient.delete}. */
-  public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
+  public async delete<TRow extends object = SqlRow>(
+    table: string,
+    where: SqlWhere,
+    options: ReturningOptions,
+  ): Promise<TRow[]>;
+  public async delete(table: string, where: SqlWhere, options?: QueryOptions): Promise<number>;
+  public async delete(
+    table: string,
+    where: SqlWhere,
+    options: QueryOptions | ReturningOptions = {},
+  ): Promise<number | SqlRow[]> {
     return this.enqueue('delete', async () => deleteCommand(this.context, table, where, options));
   }
 

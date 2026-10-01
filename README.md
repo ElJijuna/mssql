@@ -966,3 +966,39 @@ losslessly represented columns; avoid high-precision decimal and sub-millisecond
 `datetime2` ordering values that the driver rounds. Cursor pagination does not provide
 a snapshot across calls: updates to ordering values can move rows between pages.
 Use an appropriate transaction isolation level when a consistent snapshot is required.
+
+### Return written rows
+
+Add `returning: true` to `insert`, `update` or `delete` to receive all affected rows,
+or pass an explicit list of columns. These overloads return a typed array, including
+an empty array when nothing matches. Without `returning`, the existing identity/count
+return values are preserved. The same overloads work on `tx`.
+
+```ts
+const [created] = await client.insert<User>(
+  'dbo.Users',
+  { name: 'Ana' },
+  { returning: ['id', 'name', 'createdAt'] },
+);
+const updated = await client.update<User>(
+  'dbo.Users', { name: 'Ana María' }, { id: created!.id }, { returning: true },
+);
+const removed = await client.delete<User>(
+  'dbo.Users', { id: created!.id }, { returning: true },
+);
+```
+
+The write uses a single statement with `OUTPUT INSERTED` (insert/update) or
+`OUTPUT DELETED` (delete), so defaults, computed columns and rowversion are returned
+without a follow-up read. Returned rows have no guaranteed order. Projection names
+must be distinct, unqualified column names; expressions are not accepted.
+
+This mode uses direct `OUTPUT` without `INTO`. SQL Server rejects it when the target
+has an enabled trigger for that write action. Values represent the statement's result,
+not changes made by subsequent triggers. See [SQL Server OUTPUT semantics](https://learn.microsoft.com/en-us/sql/t-sql/queries/output-clause-transact-sql).
+Use a custom `query` with `OUTPUT INTO` when trigger compatibility is required.
+
+Values retain the driver's normal result types and precision limits. Returned rows
+inside a transaction do not imply a commit; use the result only after the transaction
+succeeds. Rejected writes throw the normal library error rather than returning rows.
+`insertMany` and `merge` retain their existing batch result contracts.

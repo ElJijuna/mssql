@@ -26,14 +26,14 @@ export const bindRow = (row: SqlRow, request: sql.Request, offset: number): Map<
  *
  * @internal
  */
-export const insertSql = (target: string, params: Map<string, string>): string => {
+export const insertSql = (target: string, params: Map<string, string>, output = ''): string => {
   if (params.size === 0) {
-    return `INSERT INTO ${target} DEFAULT VALUES;`;
+    return `INSERT INTO ${target}${output} DEFAULT VALUES;`;
   }
 
   const columns = [...params.keys()].map(quoteIdentifier).join(', ');
 
-  return `INSERT INTO ${target} (${columns}) VALUES (${[...params.values()].join(', ')});`;
+  return `INSERT INTO ${target} (${columns})${output} VALUES (${[...params.values()].join(', ')});`;
 };
 
 /**
@@ -46,7 +46,8 @@ export const buildInsertStatement = (
   row: SqlRow,
   request: sql.Request,
   offset = 0,
-): string => insertSql(target, bindRow(row, request, offset));
+  output = '',
+): string => insertSql(target, bindRow(row, request, offset), output);
 
 const isNullValue = (value: unknown): boolean =>
   value === null || value === undefined || (value instanceof SqlParam && value.value === null);
