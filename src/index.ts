@@ -48,6 +48,8 @@ export type {
 } from './events/events';
 export type { Listener, SubscribeOptions } from './events/TypedEmitter';
 export { TypedEmitter } from './events/TypedEmitter';
+export type { SqlQueryCatalogOptions, SqlQueryDefinition } from './files/SqlQueryCatalog';
+export { SqlQueryCatalog } from './files/SqlQueryCatalog';
 export type { SqlParams } from './sql/bindNamed';
 export { SqlFragment, SqlIdentifier, SqlRaw, tsql } from './sql/fragment';
 export type { SqlIdentity } from './types/identity';

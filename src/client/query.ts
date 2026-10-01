@@ -47,7 +47,10 @@ const run = async <TRow extends object>(
   const query = ctx.runner(operation, options);
   const request = await ctx.request();
   const statement = bindNamedParameters(request, text, analysis, params);
-  const display = operation === 'queryFile' ? `-- ${source}\n${statement}` : statement;
+  const display =
+    operation === 'queryFile' || operation === 'queryNamed'
+      ? `-- ${source}\n${statement}`
+      : statement;
   const result = await query(request, display, async (req) =>
     req.query<Record<string, unknown>>(statement),
   );
@@ -88,6 +91,22 @@ export const queryFileCommand = async <TRow extends object>(
   const { name, text, analysis } = await ctx.sqlFile(file);
 
   return run<TRow>(ctx, 'queryFile', name, text, analysis, params, options);
+};
+
+/** @internal */
+export const queryNamedCommand = async <TRow extends object>(
+  ctx: CommandContext,
+  name: string,
+  params: SqlParams,
+  options: RawQueryOptions,
+): Promise<QueryResult<TRow>> => {
+  if (!ctx.sqlNamed) {
+    throw new SqlClientError('queryNamed requires a sqlCatalog in client options');
+  }
+
+  const { text, analysis } = ctx.sqlNamed(name);
+
+  return run<TRow>(ctx, 'queryNamed', name, text, analysis, params, options);
 };
 
 /**

@@ -33,6 +33,7 @@ import {
   type QueryResult,
   queryCommand,
   queryFileCommand,
+  queryNamedCommand,
   type RawQueryOptions,
 } from './query';
 import type { RetryOption } from './retry';
@@ -86,6 +87,7 @@ export interface TransactionHooks {
   runner: (operation: SqlOperation, options: QueryOptions, transactionId: number) => QueryRunner;
   rowFailure: (event: SqlRowFailureEvent) => void;
   sqlFile: (file: string) => Promise<SqlFile>;
+  sqlNamed?: (name: string) => SqlFile;
 }
 
 /**
@@ -114,6 +116,7 @@ export class SqlTransaction {
       runner: (operation, options) => hooks.runner(operation, options, id),
       rowFailure: hooks.rowFailure,
       sqlFile: hooks.sqlFile,
+      sqlNamed: hooks.sqlNamed,
       request: async () => Promise.resolve(this.transaction.request()),
       connection: async () => Promise.resolve(this.connection()),
     };
@@ -267,6 +270,17 @@ export class SqlTransaction {
 
       return queryCommand<TRow>(this.context, text, params, options);
     });
+  }
+
+  /** Transaction version of {@link SqlClient.queryNamed}. */
+  public async queryNamed<TRow extends object = SqlRow>(
+    name: string,
+    params: SqlParams = {},
+    options: RawQueryOptions = {},
+  ): Promise<QueryResult<TRow>> {
+    return this.enqueue('queryNamed', async () =>
+      queryNamedCommand<TRow>(this.context, name, params, options),
+    );
   }
 
   /** Transaction version of {@link SqlClient.queryFile}. */

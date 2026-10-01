@@ -1038,3 +1038,58 @@ retry policy. Opt in per call with `retry` only when your policy guarantees the 
 attempt did not commit. Retrying a transaction callback can also repeat its increments;
 atomic arithmetic does not provide exactly-once delivery. Debug/events, timeout,
 cancellation and the existing `returning` restrictions continue to apply.
+
+### Named SQL query catalog
+
+Load a catalog during startup to discover SQL files, check query names and analyze
+required parameters before opening a database connection. Execute queries by name
+with `queryNamed`, including inside transactions.
+
+```ts
+import { SqlClient, SqlQueryCatalog } from '@pilmee/mssql';
+
+const sqlCatalog = await SqlQueryCatalog.load({
+  dir: new URL('./', import.meta.url),
+  pattern: 'src/**/*.sql',
+});
+const client = new SqlClient(config, { sqlCatalog });
+
+// src/users/findById.sql: SELECT * FROM dbo.Users WHERE id = @id;
+const { rows } = await client.queryNamed<User>('src/users/findById', { id: 7 });
+await client.transaction(async (tx) => {
+  await tx.queryNamed('src/users/findById', { id: 7 });
+});
+```
+
+Names are case-sensitive paths relative to `dir`, using `/`, with the final extension
+removed. Set `dir` to the queries directory to get shorter names such as
+`users/findById`. The default pattern is `**/*.sql`. A pattern array supports several
+locations or extensions (for example `['src/**/*.sql', 'reports/**/*.tsql']`). The
+supported wildcard syntax is `*`, `?`, and `**` as a complete path segment; patterns
+must be relative and cannot contain `..`, braces, character classes or negation.
+Overlapping matches are deduplicated. Symlink files and directories are skipped.
+
+Loading rejects no matches, duplicate names, unreadable files, empty SQL and `GO`
+batch separators. This is structural validation, not SQL Server syntax or schema
+validation. Parameter inference uses the same analyzer and limitations as `queryFile`;
+missing parameters are checked at execution before connecting, unless
+`validateParams: false` is provided.
+
+Inspect the catalog with `names()`, `has(name)` and `get(name)`; `get` returns
+`{ name, path, text, parameters }`. File contents form a startup snapshot. Reload
+and create a new client to adopt edits; `cacheSqlFiles` applies only to `queryFile`.
+Copy the SQL files into your deployment and resolve `dir` to their runtime location.
+
+For bundlers or deployments without SQL files on disk, register strings instead:
+
+```ts
+const sqlCatalog = SqlQueryCatalog.fromQueries({
+  'users/findById': 'SELECT * FROM dbo.Users WHERE id = @id;',
+});
+```
+
+Named queries share parameter binding, result sets, error normalization, debug,
+cancellation and timeout behavior with raw queries. Events use `operation: 'queryNamed'`
+and include the query name in a SQL comment. Retries require explicit per-call opt-in
+because registered SQL may write data. A catalog can be shared by several clients;
+loading and inspection never create a pool. Existing `queryFile` usage is unchanged.

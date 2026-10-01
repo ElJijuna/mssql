@@ -16,6 +16,7 @@ export type SqlOperation =
   | 'exec'
   | 'query'
   | 'queryFile'
+  | 'queryNamed'
   | 'set';
 
 /**

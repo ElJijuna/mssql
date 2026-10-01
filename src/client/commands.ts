@@ -38,6 +38,7 @@ export interface CommandContext {
   rowFailure: (event: SqlRowFailureEvent) => void;
   /** Loads a SQL file (cached, relative to `sqlDir`). */
   sqlFile: (file: string) => Promise<SqlFile>;
+  sqlNamed?: (name: string) => SqlFile;
   /** Row-level retries for `'continue'` batches; set per call by the client, never in a transaction. */
   rowRetry?: RowRetry;
 }

@@ -11,6 +11,7 @@ import { normalizeError } from '../errors/SqlQueryError';
 import type { SqlClientEvents, SqlOperation } from '../events/events';
 import { TypedEmitter } from '../events/TypedEmitter';
 import { SqlFileLoader } from '../files/SqlFileLoader';
+import type { SqlQueryCatalog } from '../files/SqlQueryCatalog';
 import type { SqlParams } from '../sql/bindNamed';
 import type { SqlFragment } from '../sql/fragment';
 import type { SqlIdentity } from '../types/identity';
@@ -42,6 +43,7 @@ import {
   type QueryResult,
   queryCommand,
   queryFileCommand,
+  queryNamedCommand,
   type RawQueryOptions,
 } from './query';
 import {
@@ -63,6 +65,8 @@ import type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './t
  * Client-level options.
  */
 export interface SqlClientOptions {
+  /** Preloaded named SQL queries for queryNamed(). */
+  sqlCatalog?: SqlQueryCatalog;
   /**
    * Whether `close()` closes the underlying pool. Defaults to `true` for a configuration and
    * `false` for an existing pool. Set `true` only when transferring ownership of an external pool
@@ -141,6 +145,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     this.sqlFiles = new SqlFileLoader(options.sqlDir, options.cacheSqlFiles ?? true);
     this.context = {
       sqlFile: async (file) => this.sqlFiles.load(file),
+      sqlNamed: options.sqlCatalog?.loadQuery.bind(options.sqlCatalog),
       runner: (operation, queryOptions) => this.runner(operation, queryOptions, null),
       rowFailure: (event) => {
         this.emit('rowFailure', event);
@@ -420,6 +425,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     const start = performance.now();
     const tx = new SqlTransaction(transaction, transactionId, {
       sqlFile: async (file) => this.sqlFiles.load(file),
+      sqlNamed: this.context.sqlNamed,
       runner: (operation, queryOptions, id) => this.runner(operation, queryOptions, id, scope),
       rowFailure: (event) => {
         this.emit('rowFailure', event);
@@ -782,6 +788,20 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     } catch (error) {
       throw normalizeError(error, 'query');
     }
+  }
+
+  /** Execute a registered SQL query. Retries require explicit per-call opt-in. */
+  public async queryNamed<TRow extends object = SqlRow>(
+    name: string,
+    params: SqlParams = {},
+    options: RawQueryOptions = {},
+  ): Promise<QueryResult<TRow>> {
+    return this.call(
+      'queryNamed',
+      options,
+      async (ctx, resolved) => queryNamedCommand<TRow>(ctx, name, params, resolved),
+      { retryByDefault: false },
+    );
   }
 
   /**

@@ -5,6 +5,7 @@ import sql from 'mssql';
 import { BatchRowError } from '../errors/BatchRowError';
 import { SqlAbortError } from '../errors/SqlAbortError';
 import { SqlClientError } from '../errors/SqlClientError';
+import { SqlQueryCatalog } from '../files/SqlQueryCatalog';
 import { tsql } from '../sql/fragment';
 import { inc, t } from '../types/SqlParam';
 import { SqlClient } from './SqlClient';
@@ -152,6 +153,56 @@ describe('SqlClient', () => {
         ),
       ),
     ).toEqual([{ count: 2 }]);
+  });
+
+  it('executes catalog queries with parameters, names in events and transaction support', async () => {
+    const sqlCatalog = SqlQueryCatalog.fromQueries({ 'users/find': 'SELECT @id AS id;' });
+    const client = new SqlClient(config, { sqlCatalog });
+    const listener = jest.fn();
+
+    request.query.mockResolvedValue({ recordsets: [[{ id: 42 }]], rowsAffected: [1] });
+    client.on('query', listener);
+
+    expect((await client.queryNamed<{ id: number }>('users/find', { id: 42 })).rows).toEqual([
+      { id: 42 },
+    ]);
+    expect(request.query).toHaveBeenCalledWith('SELECT @id AS id;');
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'queryNamed',
+        sql: '-- users/find\nSELECT @id AS id;',
+        transactionId: null,
+      }),
+    );
+    expect(
+      (await client.transaction(async (tx) => tx.queryNamed('users/find', { id: 42 }))).rows,
+    ).toEqual([{ id: 42 }]);
+    expect(transaction.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('validates catalog names, configuration and parameters before connecting', async () => {
+    const sqlCatalog = SqlQueryCatalog.fromQueries({ find: 'SELECT @id;' });
+
+    await expect(new SqlClient(config).queryNamed('find')).rejects.toMatchObject({
+      code: 'SQL_CLIENT_ERROR',
+      operation: 'queryNamed',
+    });
+    await expect(new SqlClient(config, { sqlCatalog }).queryNamed('missing')).rejects.toThrow(
+      'Unknown SQL query',
+    );
+    await expect(new SqlClient(config, { sqlCatalog }).queryNamed('find')).rejects.toThrow();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('does not retry named queries without explicit opt-in', async () => {
+    request.query.mockRejectedValueOnce({ number: 1205, message: 'deadlock' });
+    const client = new SqlClient(config, {
+      sqlCatalog: SqlQueryCatalog.fromQueries({ write: 'UPDATE Users SET count = count + 1;' }),
+      retry: true,
+    });
+
+    await expect(client.queryNamed('write')).rejects.toThrow();
+    expect(request.query).toHaveBeenCalledTimes(1);
   });
 
   describe('connection', () => {

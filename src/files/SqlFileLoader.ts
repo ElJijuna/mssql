@@ -39,8 +39,8 @@ export class SqlFileLoader {
   /**
    * Resolves `file` against the base directory. With a base directory, paths may not escape it.
    */
-  public resolve(file: string): { name: string; path: string } {
-    const name = extname(file) === '' ? `${file}.sql` : file;
+  public resolve(file: string, appendExtension = true): { name: string; path: string } {
+    const name = appendExtension && extname(file) === '' ? `${file}.sql` : file;
 
     if (this.dir === undefined) {
       return { name, path: resolve(name) };
@@ -59,8 +59,8 @@ export class SqlFileLoader {
   /**
    * Reads, analyzes and (when caching) remembers a file.
    */
-  public async load(file: string): Promise<SqlFile> {
-    const { name, path } = this.resolve(file);
+  public async load(file: string, appendExtension = true): Promise<SqlFile> {
+    const { name, path } = this.resolve(file, appendExtension);
     const cached = this.useCache ? this.cache.get(path) : undefined;
 
     if (cached) {
