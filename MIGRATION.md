@@ -1,6 +1,6 @@
 # Migration plan: `mssql` to `@pilmee/mssql`
 
-This guide targets the API in this repository (`@pilmee/mssql` 1.0.1). The package adds helpers on top of `mssql`; it is not a drop-in replacement for its exports. Keep `mssql` installed and migrate one repository method at a time. No database schema or data migration is required by adopting the wrapper.
+This guide targets `@pilmee/mssql` 1.2.0. Use version 1.2.0 or newer for the features described below. The package adds helpers on top of `mssql`; it is not a drop-in replacement for its exports. Keep `mssql` installed and migrate one repository method at a time. No database schema or data migration is required by adopting the wrapper.
 
 ## 1. Inventory the existing integration
 
@@ -114,7 +114,7 @@ Here `User` is an application-defined row interface. Generics describe expected 
 | --- | --- |
 | `result.recordset` | `result.rows` |
 | `result.recordsets` | `result.recordsets`, with helper row typing; retain raw calls for metadata attached by the driver |
-| `result.rowsAffected` | `result.rowsAffected` for `query`, `queryFile`, and `exec` |
+| `result.rowsAffected` | `result.rowsAffected` for `query`, `queryFile`, `queryNamed`, and `exec` |
 | Driver-specific metadata or options | Keep the raw request |
 | `.input(name, sql.Int, value)` | `{ name: t.int(value) }` |
 | `.input(name, sql.NVarChar(100), value)` | `{ name: t.nvarchar(value, 100) }` |
@@ -132,11 +132,13 @@ Tagged templates are optional: `await client.query\`SELECT id FROM dbo.Users WHE
 | --- | --- | --- |
 | Simple filtered SELECT | `select` | Returns rows directly; equality, null, and array filters are joined with AND |
 | First matching row | `findOne` | Returns a row or `null`; use `orderBy` to choose deterministically |
-| Single INSERT | `insert` | Returns an identity or `null`, not the full driver result |
-| UPDATE / DELETE | `update` / `delete` | Returns affected-row count; rejects empty filters |
+| Single INSERT | `insert` | Returns an identity or `null`; `{ returning }` instead returns written rows |
+| UPDATE / DELETE | `update` / `delete` | Returns affected-row count, or rows with `{ returning }`; rejects empty filters |
 | Many INSERTs | `insertMany` | Transactional by default; returns aligned ids and failure details |
 | Upsert | `merge` | Uses locked UPDATE/INSERT logic; verify keys, triggers, and concurrency |
-| Joins, OR, ranges, complex SQL | `query` / `queryFile` | Preserve the existing SQL |
+| Forward cursor pagination | `page` | Requires a declared unique, non-null key and lossless ordering values |
+| Read/modify/write counters | `update` with `inc` | Computes from the current database value; no automatic retries by default |
+| Joins, OR, ranges, complex SQL | `query` / `queryFile` / `queryNamed` | Preserve the existing SQL |
 
 ```ts
 const users = await client.select<User>('dbo.Users', { tenantId, active: true });
@@ -146,6 +148,114 @@ const affected = await client.update('dbo.Users', { active: false }, { id });
 ```
 
 Do not replace `request.bulk` mechanically with `insertMany`: batching individual inserts has different SQL, throughput, and identity semantics. Keep streaming, TVPs, prepared statements, and batch-specific workflows on raw `mssql` requests unless separately redesigned. See the [official driver API](https://github.com/tediousjs/node-mssql#documentation) for those retained paths.
+
+### Replace offset pagination with a cursor when appropriate
+
+Keep `select` with `offset` when callers need arbitrary page numbers. For forward-only
+navigation, replace the offset with a continuation cursor:
+
+```ts
+// Before: growing offset, including a deterministic tie-breaker
+const oldPage = await pool.request()
+  .input('tenantId', sql.Int, tenantId)
+  .input('offset', sql.Int, offset)
+  .input('limit', sql.Int, 50)
+  .query(`SELECT * FROM dbo.Events WHERE tenantId = @tenantId
+    ORDER BY sequence DESC, id ASC OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;`);
+
+// After: after is undefined for the first page, then previous.nextCursor ?? undefined
+const page = await client.page<EventRow>('dbo.Events', {
+  where: { tenantId },
+  orderBy: { sequence: 'desc' },
+  key: 'id',
+  limit: 50,
+  after,
+});
+// page.rows, page.hasMore, page.nextCursor
+```
+
+`EventRow` is an application-defined row interface. `key` declares a unique, non-null
+column or composite key; missing key terms are appended ascending. The library cannot
+verify database uniqueness. Mixed directions and SQL Server null ordering are supported.
+The limit defaults to 50. The query fetches one extra row to detect another page;
+`nextCursor` is null on the final or empty page.
+
+Keep the table, filters and ordering unchanged between pages. Projection must include
+all ordering columns, and ordering names must be unqualified. Use an index that supports
+the filters and ordering. Ordering values must round-trip through the driver exactly;
+avoid rounded decimal values and sub-millisecond `datetime2` values. Returned cursor
+objects are in-memory markers, not authenticated API tokens; preserve Date/Buffer types
+and validate untrusted input when transporting them.
+
+Cursor pagination does not preserve offset/page-number semantics or a snapshot across
+calls. Updating ordering values can move rows between pages. Use `tx.page` with an
+appropriate isolation level when consistent reads are required, and keep any transaction
+short rather than retaining it across HTTP page requests.
+
+### Return rows from a write without a follow-up read
+
+If existing code uses `OUTPUT` or reads a row after inserting/updating it, opt into a row
+return rather than treating the default identity/count result as a row:
+
+```ts
+const [created] = await client.insert<User>(
+  'dbo.Users',
+  { name: t.nvarchar(name, 100) },
+  { returning: ['id', 'name', 'createdAt'] },
+);
+const updated = await client.update<User>(
+  'dbo.Users', { active: false }, { id }, { returning: true },
+);
+const removed = await client.delete<User>(
+  'dbo.Users', { id }, { returning: ['id', 'name'] },
+);
+```
+
+`returning: true` selects every column; an explicit array selects distinct, unqualified
+column names, not SQL expressions. All three overloads return arrays, with `[]` for no
+matches. Without the option, identity/count returns remain unchanged. `tx` supports the
+same overloads. `insertMany` and `merge` retain their existing batch result contracts.
+
+Writes use direct `OUTPUT INSERTED` or `OUTPUT DELETED` in the same statement. Verify
+defaults, computed columns, rowversion and result types. Row order is not guaranteed,
+and values retain driver precision limits; the default `insert` identity conversion does
+not apply to BIGINT columns returned through `returning`.
+
+SQL Server rejects direct `OUTPUT` when an enabled trigger exists for that write action.
+Retain a custom `query` with `OUTPUT INTO` for those tables. OUTPUT values describe the
+statement before subsequent trigger changes, not a post-trigger reread. See the
+[SQL Server OUTPUT documentation](https://learn.microsoft.com/en-us/sql/t-sql/queries/output-clause-transact-sql).
+A returned row inside a transaction does not prove that transaction committed; consume
+it only after `transaction()` succeeds.
+
+### Replace application-side increments with atomic arithmetic
+
+Remove read/modify/write counter logic and compute from the current column value:
+
+```ts
+import { inc, t } from '@pilmee/mssql';
+
+await client.update('dbo.Counters', {
+  count: inc(), // +1
+  balance: inc(t.decimalExact('-0.01', 18, 2)), // subtract exactly
+  lastChangedBy: userId, // ordinary assignments can share the statement
+}, { id }, { retry: false });
+```
+
+`inc(amount)` accepts finite numbers, bigint and non-null numeric typed parameters.
+It defaults to 1; negative values subtract and zero is accepted. Unsafe integer numbers
+are rejected. Use exact decimal builders or bigint where precision matters. SQL Server
+applies the destination type, scale, overflow rules and constraints. SQL null arithmetic
+is preserved: a null counter stays null; initialize it with a non-null default if needed.
+
+The expression is valid only in `update` values, including `tx.update`, and can be combined
+with `returning`. It is rejected in inserts, merge rows, filters and raw parameters.
+Updates still require a non-empty filter and return 0 (or [] with `returning`) for no matches.
+
+Updates containing increments do not inherit automatic retries from the client. Explicit
+per-call retry policies and retries of the whole transaction callback can repeat an
+increment; opt in only when the prior attempt is known not to have committed. Atomic
+arithmetic prevents lost increments but does not guarantee exactly-once delivery.
 
 ## 6. Migrate procedures and transactions
 
@@ -171,9 +281,13 @@ The callback commits when it resolves and rolls back when it throws. Use `tx` fo
 
 Preserve the old isolation level. Exercise rollback and doomed transactions. Batch helpers use savepoints inside an existing transaction, so catching a batch error can allow other work to commit; verify that this is the intended application behavior.
 
-## 7. Move SQL into files when useful
+## 7. Move SQL into files or a named catalog
 
-The current API supports a base directory and one exact file per call. It does **not** accept glob patterns or automatically discover/register/execute a directory of files.
+Choose `queryFile` for one exact file per call, or preload a `SqlQueryCatalog` to discover
+and validate files at startup and execute them by registered name. Discovery never
+executes SQL and is not a schema migration runner.
+
+### Preserve exact-file calls
 
 ```ts
 const client = new SqlClient(config, {
@@ -191,30 +305,85 @@ const { rows } = await client.queryFile<User>('users/by-tenant', { tenantId });
 SELECT id, name FROM dbo.Users WHERE tenantId = @tenantId;
 ```
 
-### Directory, extension, and `src/**/*.sql`
+`queryFile` reads UTF-8, removes a BOM and caches successful reads by default. Paths may
+not lexically escape an explicit `sqlDir`; this check does not resolve symlinks. Without
+`sqlDir`, paths resolve against the working directory. `GO` batch separators are rejected.
 
-| Requirement | Current support |
-| --- | --- |
-| Base directory | Yes: `sqlDir: 'src'`, relative to the process working directory, or a file URL |
-| Nested files | Yes: `queryFile('features/users/list.sql')` within that base |
-| Omit extension | Yes: `queryFile('features/users/list')` appends `.sql` |
-| Explicit different extension | Yes: `queryFile('features/users/list.tsql')` reads that exact file |
-| Configure a default extension | No: there is no `sqlExtension` option; omitted extensions always become `.sql` |
-| `sqlDir: 'src/**/*.sql'` | No: interpreted as a literal directory path |
-| `queryFile('src/**/*.sql')` | No: interpreted as a literal file path, normally yielding file-not-found |
-| Discover all matching files | No built-in glob/list/preload API |
+### Discover and register named queries
 
-For files distributed under `src`, use `sqlDir: 'src'` and provide the specific relative filename for each query. For a custom extension, include it on every call. If glob discovery is required, perform it in application/build tooling, select a concrete file, and pass its path relative to `sqlDir` to `queryFile`. Discovery alone should not execute every SQL file: files can have different parameters and database effects.
+```ts
+import { SqlClient, SqlQueryCatalog } from '@pilmee/mssql';
 
-The loader reads UTF-8, caches successfully loaded files by default, and removes a UTF-8 BOM. Its path check rejects paths that lexically escape an explicitly configured `sqlDir`; it does not resolve symlinks for containment. Without `sqlDir`, paths resolve against the working directory. Files containing `GO` batch separators are rejected. This API is for queries, not a schema migration runner with ordering or a migration history table.
+const sqlCatalog = await SqlQueryCatalog.load({
+  dir: new URL('./', import.meta.url),
+  pattern: 'src/**/*.sql',
+});
+const client = new SqlClient(config, { sqlCatalog, retry: false });
 
-Copy SQL files into the release artifact while preserving their relative paths. A module-relative URL resolves from the built module, so if `src/db.ts` becomes `dist/db.js`, ship `dist/sql/...` for the example above. Bundling does not automatically include SQL assets. Alternatively, import SQL as text with supported bundler tooling and pass that text to `query`.
+const { rows } = await client.queryNamed<User>('src/users/by-tenant', { tenantId });
+// Registered from src/users/by-tenant.sql relative to dir
+```
 
-**Exit criterion:** a smoke query runs from the packaged artifact under the deployment working directory, with all expected SQL files present.
+To migrate an existing exact-file call without changing its name, load the catalog with
+the old `sqlDir` as `dir`. For example, `dir: new URL('./sql/', import.meta.url)` and the
+default `**/*.sql` pattern register `sql/users/by-tenant.sql` as `users/by-tenant`; replace
+`queryFile('users/by-tenant', params)` with `queryNamed('users/by-tenant', params)`.
+`sqlCatalog` and `sqlDir` are independent options and may coexist.
+
+| Requirement | Exact files | Named catalog |
+| --- | --- | --- |
+| Base directory | `sqlDir` | `SqlQueryCatalog.load({ dir })` |
+| Nested files | Specific relative filename | Discovered by the configured pattern |
+| Omit extension when executing | `.sql` is appended | Registered names omit the final file extension |
+| Different extensions | Include the extension in `queryFile` | Use a pattern such as `**/*.tsql` |
+| Configure `sqlExtension` | No such option | No such option; discovery patterns select extensions |
+| `src/**/*.sql` | Not accepted by `sqlDir` or `queryFile`; treated literally | Accepted as `pattern` relative to `dir` |
+| Multiple patterns | One exact file per call | `pattern: ['src/**/*.sql', 'reports/**/*.tsql']` |
+| Inspect names and parameters | No listing API | `names()`, `has(name)`, `get(name)` |
+| Pick up file edits | `cacheSqlFiles: false` | Load a new catalog and create a new client |
+
+Catalog names are case-sensitive relative paths with `/`. Patterns support `*`, `?` and
+`**` as a complete path segment, not braces, character classes or negation. Absolute
+patterns and parent traversal are rejected; symlink files and directories are skipped.
+Overlapping matches are deduplicated. Names that collide after stripping extensions are
+rejected, as are no matches, empty SQL, unreadable files and `GO` batch separators.
+
+Catalog loading does not connect or validate SQL Server syntax/schema. Required parameter
+analysis has the same limitations as `queryFile`. Execution checks missing parameters
+before connecting unless `validateParams: false` is set. `get(name)` returns
+`{ name, path, text, parameters }`; unknown names fail before connecting. Queries share the
+existing `QueryResult` shape and typed parameter binding, and run in a transaction through
+`tx.queryNamed`. Their events use `operation: 'queryNamed'` with the name in a SQL comment.
+Retries require explicit per-call opt-in because catalog SQL may write data.
+
+### Package the SQL with the application
+
+Copy SQL files into the release artifact while preserving their relative paths. A
+module-relative URL resolves from the built module: if `src/db.ts` becomes `dist/db.js`,
+ship `dist/sql/...` for the exact-file example. Adjust catalog patterns to the deployed
+layout; a source pattern such as `src/**/*.sql` will not find files moved to `dist/sql`.
+Bundling does not automatically include SQL assets.
+
+For bundled SQL strings or environments without file access, register an explicit map:
+
+```ts
+const sqlCatalog = SqlQueryCatalog.fromQueries({
+  'users/by-tenant': 'SELECT id, name FROM dbo.Users WHERE tenantId = @tenantId;',
+});
+const client = new SqlClient(config, { sqlCatalog, retry: false });
+const { rows } = await client.queryNamed<User>('users/by-tenant', { tenantId });
+```
+
+`fromQueries` performs the same name/text/parameter analysis and rejects an empty map;
+its definitions have `path: null`. Catalogs are startup snapshots and can be shared by
+several clients. `cacheSqlFiles` affects only `queryFile`, not a preloaded catalog.
+
+**Exit criterion:** catalog loading and smoke queries succeed from the packaged artifact
+under the deployment working directory, with all expected names, parameters and assets.
 
 ## 8. Review errors, retries, cancellation, and observability
 
-Start with `retry: false` to isolate the API migration. Then opt into retries deliberately: CRUD helpers normally retry transient failures; raw query helpers, procedures, and transaction callbacks require per-call opt-in. Transaction retries rerun the entire callback. Keep HTTP calls, emails, and other external side effects outside retryable callbacks.
+Start with `retry: false` to isolate the API migration. Then opt into retries deliberately. Read helpers (including `page`) and ordinary CRUD helpers normally retry transient failures. Updates containing `inc`, raw query helpers (including `queryNamed`), procedures, and transaction callbacks require per-call opt-in. Transaction retries rerun the entire callback. Keep HTTP calls, emails, and other external side effects outside retryable callbacks.
 
 Review each catch block. Helper driver failures now throw `SqlQueryError` (a `SqlClientError`) with stable library `code`, underlying `driverCode`, SQL Server `number`, originating `operation`, and original `cause`. Validation uses `SqlClientError`, precision validation uses `SqlPrecisionError`, connection failures use `SqlConnectionError`, cancellation uses `SqlAbortError`, and rollback-mode batch row failures use `BatchRowError`. Raw driver requests and application errors thrown by transaction callbacks retain their original errors. In `onError: 'continue'` batches, inspect `failures` explicitly.
 
@@ -237,11 +406,12 @@ Add success/failure/retry metrics through client events. Debug scripts and event
 
 1. Type-check and run the application's existing tests after each migrated repository method.
 2. Use a real SQL Server test database to compare reads and verify writes, identity behavior, procedures, transaction rollback, and concurrent upserts.
-3. Exercise missing parameters/files, empty lists, custom types, cancellation, failed connections, and retry behavior.
-4. Build the deployment artifact and run it with the real directory layout and SQL assets.
-5. Deploy a small group of migrated read paths first. Compare latency, pool usage, failures, and returned data.
-6. Migrate writes after their transaction and failure behavior passes validation. Compare write outcomes using isolated test data, not duplicate production execution.
-7. Expand gradually and remove obsolete adapters/pool owners after all callers have moved.
+3. Exercise missing parameters/files/query names, duplicate catalog names, empty lists, custom types, cancellation, failed connections, and retry behavior.
+4. Verify cursor traversal across ties, mixed directions, nulls and filters; compare concurrent increments, write-return projections and transaction rollback. Check trigger compatibility and precision limits.
+5. Build the deployment artifact and run it with the real directory layout and SQL assets.
+6. Deploy a small group of migrated read paths first. Compare latency, pool usage, failures, and returned data.
+7. Migrate writes after their transaction and failure behavior passes validation. Compare write outcomes using isolated test data, not duplicate production execution.
+8. Expand gradually and remove obsolete adapters/pool owners after all callers have moved.
 
 **Release criteria:** unchanged application contracts, correct database effects, complete packaged assets, no pool leaks, and acceptable latency/error metrics.
 
