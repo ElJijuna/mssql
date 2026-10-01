@@ -1,4 +1,5 @@
 import sql from 'mssql';
+import { SqlClientError } from '../errors/SqlClientError';
 import { SqlPrecisionError } from '../errors/SqlPrecisionError';
 
 /**
@@ -59,6 +60,59 @@ export class SqlExactDecimal extends SqlParam<string> {
     super(sql.NVarChar(sql.MAX), value);
   }
 }
+
+/** An arithmetic update expression. Use only as a value in update(). */
+export class SqlIncrement {
+  public constructor(public readonly amount: number | bigint | SqlParam<number | string | bigint>) {
+    const value = amount instanceof SqlParam ? amount.value : amount;
+
+    if (
+      amount instanceof SqlParam &&
+      !(amount instanceof SqlExactDecimal) &&
+      ![
+        sql.TinyInt,
+        sql.SmallInt,
+        sql.Int,
+        sql.BigInt,
+        sql.Decimal,
+        sql.Numeric,
+        sql.Money,
+        sql.SmallMoney,
+        sql.Float,
+        sql.Real,
+      ].some((type) => type === amount.type.type)
+    ) {
+      throw new SqlClientError('Increment requires a numeric SQL parameter.');
+    }
+
+    if (
+      value === null ||
+      (typeof value !== 'number' &&
+        typeof value !== 'bigint' &&
+        !(
+          amount instanceof SqlParam &&
+          typeof value === 'string' &&
+          /^[+-]?\d+(?:\.\d+)?$/.test(value)
+        ))
+    ) {
+      throw new SqlClientError('Increment requires a non-null numeric amount.');
+    }
+
+    if (
+      typeof value === 'number' &&
+      (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value)))
+    ) {
+      throw new SqlPrecisionError(
+        'Increment numbers must be finite and integers must be safe; use bigint or an exact typed parameter.',
+      );
+    }
+  }
+}
+
+/** Add an amount to the current column value in a single UPDATE. Negative amounts subtract. */
+export const inc = (
+  amount: number | bigint | SqlParam<number | string | bigint> = 1,
+): SqlIncrement => new SqlIncrement(amount);
 
 const bigintValue = (value: Nullable<number | string | bigint>): number | string | null => {
   if (value === null) {
@@ -165,6 +219,10 @@ export const t = {
  * @internal
  */
 export const bindInput = (request: sql.Request, name: string, value: unknown): string => {
+  if (value instanceof SqlIncrement) {
+    throw new SqlClientError('Increment expressions are supported only in update values.');
+  }
+
   if (value instanceof SqlParam) {
     request.input(name, value.type, value.value);
 

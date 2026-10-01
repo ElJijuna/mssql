@@ -6,7 +6,7 @@ import { BatchRowError } from '../errors/BatchRowError';
 import { SqlAbortError } from '../errors/SqlAbortError';
 import { SqlClientError } from '../errors/SqlClientError';
 import { tsql } from '../sql/fragment';
-import { t } from '../types/SqlParam';
+import { inc, t } from '../types/SqlParam';
 import { SqlClient } from './SqlClient';
 
 jest.mock('mssql', () => {
@@ -117,6 +117,41 @@ describe('SqlClient', () => {
       await client.update('Users', { name: 'Ana' }, { id: 42 }, { returning: ['id'] }),
     ).toEqual([{ id: 42 }]);
     expect(await client.delete('Users', { id: 42 }, { returning: true })).toEqual([{ id: 42 }]);
+  });
+
+  it('does not retry increments by default, even with a client retry policy', async () => {
+    request.query.mockRejectedValueOnce({ number: 1205, message: 'deadlock' });
+    const client = new SqlClient(config, { retry: { attempts: 1, delay: 0 } });
+
+    await expect(client.update('Counters', { count: inc() }, { id: 1 })).rejects.toThrow();
+    expect(request.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows explicit increment retries and transaction returning', async () => {
+    request.query
+      .mockRejectedValueOnce({ number: 1205, message: 'deadlock' })
+      .mockResolvedValue({ recordset: [{ count: 2 }], rowsAffected: [1] });
+    const client = new SqlClient(config);
+
+    expect(
+      await client.update(
+        'Counters',
+        { count: inc() },
+        { id: 1 },
+        { retry: { attempts: 1, delay: 0 } },
+      ),
+    ).toBe(1);
+    expect(request.query).toHaveBeenCalledTimes(2);
+    expect(
+      await client.transaction(async (tx) =>
+        tx.update<{ count: number }>(
+          'Counters',
+          { count: inc() },
+          { id: 1 },
+          { returning: ['count'] },
+        ),
+      ),
+    ).toEqual([{ count: 2 }]);
   });
 
   describe('connection', () => {

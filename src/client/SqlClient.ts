@@ -14,6 +14,7 @@ import { SqlFileLoader } from '../files/SqlFileLoader';
 import type { SqlParams } from '../sql/bindNamed';
 import type { SqlFragment } from '../sql/fragment';
 import type { SqlIdentity } from '../types/identity';
+import { SqlIncrement } from '../types/SqlParam';
 import { type BatchOptions, describeError, poolConnection, rollbackQuietly } from './batch';
 import { type CallScope, createCallGuard, createScope, pause } from './cancellation';
 import {
@@ -656,8 +657,11 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     where: SqlWhere,
     options: QueryOptions | ReturningOptions = {},
   ): Promise<number | SqlRow[]> {
-    return this.call('update', options, async (ctx, o) =>
-      updateCommand(ctx, table, values, where, o),
+    return this.call(
+      'update',
+      options,
+      async (ctx, o) => updateCommand(ctx, table, values, where, o),
+      { retryByDefault: !Object.values(values).some((value) => value instanceof SqlIncrement) },
     );
   }
 

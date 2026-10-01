@@ -52,5 +52,5 @@ export type { SqlParams } from './sql/bindNamed';
 export { SqlFragment, SqlIdentifier, SqlRaw, tsql } from './sql/fragment';
 export type { SqlIdentity } from './types/identity';
 export type { Nullable, SqlLength } from './types/SqlParam';
-export { SqlExactDecimal, SqlParam, t } from './types/SqlParam';
+export { inc, SqlExactDecimal, SqlIncrement, SqlParam, t } from './types/SqlParam';
 export { quoteIdentifier } from './utils/quoteIdentifier';

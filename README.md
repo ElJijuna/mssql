@@ -1002,3 +1002,39 @@ Values retain the driver's normal result types and precision limits. Returned ro
 inside a transaction do not imply a commit; use the result only after the transaction
 succeeds. Rejected writes throw the normal library error rather than returning rows.
 `insertMany` and `merge` retain their existing batch result contracts.
+
+### Atomic increments
+
+Use `inc()` in `update` values to add to a column's current value within a single SQL
+statement. It defaults to 1; negative amounts subtract and zero is accepted. Mix
+increments and ordinary assignments, and use `returning` to read the resulting rows.
+The same syntax works with `tx.update`.
+
+```ts
+import { inc, t } from '@pilmee/mssql';
+
+const [counter] = await client.update<{ count: number }>(
+  'dbo.Counters',
+  { count: inc(), balance: inc(t.decimalExact('-0.01', 18, 2)) },
+  { id: 7 },
+  { returning: ['count'] },
+);
+// SET [count] = [count] + @p0, [balance] = [balance] + CONVERT(decimal(18, 2), @p1)
+```
+
+Amounts are bound parameters. Finite numbers, bigint and non-null numeric `t` builders
+are supported; use `t.decimalExact`/`t.numericExact` for exact decimal arithmetic and
+`bigint`/`t.bigint` for large integers. Unsafe integer numbers are rejected. SQL Server
+applies the destination column's type, scale, overflow rules and constraints.
+
+Each update computes from the current database value, avoiding lost increments from
+application-side read/modify/write cycles. SQL null arithmetic is preserved: a null
+column stays null. Initialize counters with a non-null default when needed. Expressions
+are accepted only in `update` values, not inserts, merge rows, filters or raw parameters.
+A non-empty filter is still required; no matches return 0 (or [] with `returning`).
+
+Updates containing `inc` do not inherit automatic retries, even when the client has a
+retry policy. Opt in per call with `retry` only when your policy guarantees the prior
+attempt did not commit. Retrying a transaction callback can also repeat its increments;
+atomic arithmetic does not provide exactly-once delivery. Debug/events, timeout,
+cancellation and the existing `returning` restrictions continue to apply.

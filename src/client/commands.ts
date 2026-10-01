@@ -5,6 +5,7 @@ import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlOperation, SqlRowFailureEvent } from '../events/events';
 import type { SqlFile } from '../files/SqlFileLoader';
 import { parseIdentity, type SqlIdentity } from '../types/identity';
+import { bindInput, SqlIncrement } from '../types/SqlParam';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
 import {
   type BatchConnection,
@@ -18,7 +19,7 @@ import {
 import { buildMergeStatement, type MergeOptions, missingKey, normalizeKeys } from './merge';
 import { outputClause, type ReturningOptions } from './returning';
 import { buildSelect, type FindOneOptions, type SelectOptions } from './select';
-import { bindRow, bindWhere, buildInsertStatement, type SqlWhere } from './statements';
+import { bindWhere, buildInsertStatement, type SqlWhere } from './statements';
 import type { InsertManyResult, MergeResult, SqlRow } from './types';
 
 /**
@@ -210,7 +211,18 @@ export const updateCommand = async (
   const output = 'returning' in options ? outputClause('INSERTED', options.returning) : '';
   const query = ctx.runner('update', options);
   const request = await ctx.request();
-  const set = bindRow(values, request, 0);
+  const set = new Map<string, string>();
+
+  Object.entries(values).forEach(([column, value], index) => {
+    const target = quoteIdentifier(column);
+    const param = bindInput(
+      request,
+      `p${index}`,
+      value instanceof SqlIncrement ? value.amount : value,
+    );
+
+    set.set(column, value instanceof SqlIncrement ? `${target} + ${param}` : param);
+  });
   const { predicate } = bindWhere(where, request, set.size);
   const assignments = [...set].map(([column, param]) => `${quoteIdentifier(column)} = ${param}`);
   const result = await query(
