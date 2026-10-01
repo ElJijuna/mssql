@@ -1,3 +1,15 @@
+# [1.2.0](https://github.com/ElJijuna/mssql/compare/v1.1.0...v1.2.0) (2026-10-01)
+
+
+### Features
+
+* add atomic increment support for SQL updates with enhanced error handling ([e6387e3](https://github.com/ElJijuna/mssql/commit/e6387e355d5dee6e51aaf97b3c93bd47eab51ffd))
+* add support for returning written rows in insert, update, and delete operations ([9898191](https://github.com/ElJijuna/mssql/commit/98981918e87ef4ddab3e922c62a151a05b690fe6))
+* enhance error handling and precision for SQL operations ([882dd47](https://github.com/ElJijuna/mssql/commit/882dd47dcbfa7deac9aaab49002ee96f7024ca4f))
+* enhance SqlClient to support external pool ownership and reuse ([d4124c2](https://github.com/ElJijuna/mssql/commit/d4124c24a59949622a5a554c6a46b81a8844a75c))
+* implement cursor pagination with support for unique tie-breakers and efficient querying ([5755c20](https://github.com/ElJijuna/mssql/commit/5755c2012f8bf919b2375b526a987eea1283bcc1))
+* implement named SQL query catalog with support for parameterized queries and transaction execution ([9d50765](https://github.com/ElJijuna/mssql/commit/9d50765666f978595ac506692b3787f9f1b40e7c))
+
 # [1.1.0](https://github.com/ElJijuna/mssql/compare/v1.0.1...v1.1.0) (2026-09-28)
 
 
