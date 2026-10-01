@@ -64,10 +64,10 @@ export interface SqlRowFailureEvent extends RowFailure {
 }
 
 /**
- * Connection pool opened.
+ * Connection pool became available to this client (opened or reused).
  */
 export interface SqlConnectEvent {
-  /** Time taken to open the pool, in milliseconds. */
+  /** Time taken to make the pool available, in milliseconds. */
   durationMs: number;
 }
 
@@ -125,11 +125,11 @@ export interface SqlRetryEvent {
  * Events emitted by {@link SqlClient}. Subscribe with `client.on(event, listener)`.
  */
 export interface SqlClientEvents {
-  /** The pool connected. */
+  /** The pool became available to this client. */
   connect: SqlConnectEvent;
   /** The pool failed to connect. */
   connectFailure: SqlConnectFailureEvent;
-  /** The pool was closed. */
+  /** The client released the pool; the underlying pool was closed only if owned. */
   close: Record<string, never>;
   /** A query is about to be sent. */
   query: SqlQueryEvent;

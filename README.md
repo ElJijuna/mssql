@@ -51,6 +51,42 @@ const result = await pool.request().query('SELECT 1 AS ok');
 await client.close();
 ```
 
+### Reuse an existing pool
+
+Pass your application's `mssql.ConnectionPool` directly. It may already be connected; otherwise,
+the client connects it on first use without creating another pool.
+
+```ts
+import sql from 'mssql';
+import { SqlClient } from '@pilmee/mssql';
+
+const pool = new sql.ConnectionPool(config);
+await pool.connect();
+
+const client = new SqlClient(pool);
+const users = await client.select('dbo.Users', { active: true });
+// Raw requests and other clients can keep using this same pool.
+
+await client.close(); // releases the client's reference; the borrowed pool stays open
+await pool.close();   // the application owner closes it after all users have finished
+```
+
+| Source | Default ownership | Effect of `client.close()` |
+| --- | --- | --- |
+| Configuration object | Owned | Closes the client-created pool |
+| Existing pool | Borrowed | Releases the client reference without closing the pool |
+| Existing pool with `{ ownsPool: true }` | Owned | Closes the supplied pool |
+
+Use `new SqlClient(pool, { ownsPool: true })` only when transferring responsibility for shutdown
+to that client. Multiple clients can borrow a pool; each keeps its own options and event listeners.
+Helpers and transactions use the supplied pool, while raw requests remain outside helper
+instrumentation. Drain operations before closing an owned pool. A later `connect()` or helper call
+can reuse/reconnect after `client.close()`; closing is not permanent disposal. The external owner
+must not close a pool while borrowers are using it.
+
+The `connect` event means the pool became available to this client (including an already connected
+borrowed pool); `close` means the client released it, and only an owning client closes the pool.
+
 In every helper, values are sent as parameters and table/column names are bracket-quoted (`dbo.Users` → `[dbo].[Users]`), so user input is never concatenated into the SQL.
 
 ## Operations at a glance
@@ -721,9 +757,9 @@ client
 
 | Event | When | Payload |
 | --- | --- | --- |
-| `connect` | Pool opened | `durationMs` |
+| `connect` | Pool available to this client (opened or reused) | `durationMs` |
 | `connectFailure` | Pool failed to open | `durationMs`, `error` |
-| `close` | Pool closed | `{}` |
+| `close` | Client released the pool (closed only when owned) | `{}` |
 | `query` | A query is about to be sent | `id`, `operation`, `transactionId`, `sql`, `params` |
 | `success` | A query completed | `id`, `operation`, `transactionId`, `sql`, `params`, `durationMs`, `rowsAffected` |
 | `failure` | A query failed (the method still throws) | `id`, `operation`, `transactionId`, `sql`, `params`, `durationMs`, `error`, `number` |

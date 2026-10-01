@@ -59,6 +59,12 @@ import type { InsertManyResult, MergeResult, SqlClientConfig, SqlRow } from './t
  */
 export interface SqlClientOptions {
   /**
+   * Whether `close()` closes the underlying pool. Defaults to `true` for a configuration and
+   * `false` for an existing pool. Set `true` only when transferring ownership of an external pool
+   * to this client; other users of that pool must stop before closing it.
+   */
+  ownsPool?: boolean;
+  /**
    * Print the SQL of every helper call before it is sent. `true` uses `console.debug`; pass a
    * function to route entries to your own logger. Each call can override it with its own `debug`.
    *
@@ -109,7 +115,8 @@ const ISOLATION_LEVELS: Record<SqlIsolationLevel, sql.IIsolationLevel> = {
  *   .on('rowFailure', ({ index, number, message }) => logger.warn({ index, number, message }));
  */
 export class SqlClient extends TypedEmitter<SqlClientEvents> {
-  private readonly config: SqlClientConfig;
+  private readonly source: SqlClientConfig | sql.ConnectionPool;
+  private readonly ownsPool: boolean;
   private readonly options: SqlClientOptions;
   private readonly context: CommandContext;
   private readonly sqlFiles: SqlFileLoader;
@@ -117,9 +124,14 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   private queryId = 0;
   private transactionId = 0;
 
-  public constructor(config: SqlClientConfig, options: SqlClientOptions = {}) {
+  /**
+   * Accepts a configuration or an existing pool (connected or not). An existing pool is borrowed
+   * by default: its owner remains responsible for closing it.
+   */
+  public constructor(source: SqlClientConfig | sql.ConnectionPool, options: SqlClientOptions = {}) {
     super();
-    this.config = config;
+    this.source = source;
+    this.ownsPool = options.ownsPool ?? !('connect' in source);
     this.options = options;
     this.sqlFiles = new SqlFileLoader(options.sqlDir, options.cacheSqlFiles ?? true);
     this.context = {
@@ -297,7 +309,11 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     const start = performance.now();
 
     try {
-      const pool = await new sql.ConnectionPool(this.config).connect();
+      const pool = 'connect' in this.source ? this.source : new sql.ConnectionPool(this.source);
+
+      if (!pool.connected) {
+        await pool.connect();
+      }
 
       this.emit('connect', { durationMs: performance.now() - start });
 
@@ -730,7 +746,8 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
   }
 
   /**
-   * Closes the connection pool if it was opened.
+   * Releases this client's pool reference. Closes the pool only when this client owns it.
+   * A later helper call or `connect()` can reconnect/reuse the pool.
    */
   public async close(): Promise<void> {
     if (!this.poolPromise) {
@@ -740,7 +757,11 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     const pool = await this.poolPromise;
 
     this.poolPromise = undefined;
-    await pool.close();
+
+    if (this.ownsPool) {
+      await pool.close();
+    }
+
     this.emit('close', {});
   }
 }

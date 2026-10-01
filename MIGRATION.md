@@ -36,7 +36,7 @@ import { SqlClient, t } from '@pilmee/mssql';
 const { SqlClient, t } = require('@pilmee/mssql');
 ```
 
-The wrapper constructs its pool using the default `mssql` import. It has no constructor option for injecting an existing pool or selecting `mssql/msnodesqlv8`. Treat applications using that alternate driver as a separate compatibility task before adopting the wrapper.
+When given a configuration, the wrapper constructs its pool using the default `mssql` import. It also accepts an existing `mssql.ConnectionPool`; the constructor has no separate driver-selection option. Applications using an alternate driver should validate helper compatibility separately rather than assuming default-driver tests cover it.
 
 ## 3. Centralize connection ownership
 
@@ -61,6 +61,16 @@ export async function stopDatabase() {
 ```
 
 `connect()` returns the client's raw `mssql.ConnectionPool`. Repeated calls on the same client reuse that pool. Installing the peer dependency shares the driver implementation, but does not make independently constructed clients or the global `mssql` pool share a connection pool.
+
+If the application already owns a pool, reuse it directly to preserve connection ownership:
+
+```ts
+const client = new SqlClient(existingPool, { retry: false });
+await client.query('SELECT 1 AS ok');
+await client.close(); // borrowed pool stays open; the existing owner closes it at shutdown
+```
+
+An unopened supplied pool is connected lazily. `{ ownsPool: true }` explicitly transfers shutdown responsibility to the client; do not enable it for multiple wrappers sharing a pool. Client `connect`/`close` events describe acquiring/releasing the pool, so a borrowed client's `close` event does not indicate that physical connections were closed.
 
 For the least disruptive first change, route existing raw code through the client-owned pool:
 

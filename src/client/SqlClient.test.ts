@@ -73,6 +73,92 @@ describe('SqlClient', () => {
   });
 
   describe('connection', () => {
+    const externalPool = (): sql.ConnectionPool => pool as unknown as sql.ConnectionPool;
+
+    it('uses an already connected external pool without opening another connection', async () => {
+      Object.assign(pool, { connected: true });
+      const connect = jest.fn();
+      const client = new SqlClient(externalPool()).on('connect', connect);
+
+      await expect(client.connect()).resolves.toBe(pool);
+      await expect(client.select('Users')).resolves.toEqual([{ id: 42 }]);
+
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+      expect(pool.connect).not.toHaveBeenCalled();
+      expect(pool.request).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('connects an unopened external pool once for concurrent calls', async () => {
+      const client = new SqlClient(externalPool());
+
+      await expect(Promise.all([client.connect(), client.connect()])).resolves.toEqual([
+        pool,
+        pool,
+      ]);
+
+      expect(pool.connect).toHaveBeenCalledTimes(1);
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
+    it('retries the same external pool after connection failure', async () => {
+      const cause = new Error('Login failed');
+      const failure = jest.fn();
+      const client = new SqlClient(externalPool()).on('connectFailure', failure);
+
+      pool.connect.mockRejectedValueOnce(cause);
+      await expect(client.connect()).rejects.toMatchObject({ name: 'SqlConnectionError', cause });
+      await expect(client.connect()).resolves.toBe(pool);
+
+      expect(pool.connect).toHaveBeenCalledTimes(2);
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+      expect(failure).toHaveBeenCalledWith(expect.objectContaining({ error: cause }));
+    });
+
+    it('leaves a shared pool usable when either borrowing client closes', async () => {
+      Object.assign(pool, { connected: true });
+      const close = jest.fn();
+      const first = new SqlClient(externalPool()).on('close', close);
+      const second = new SqlClient(externalPool());
+
+      await Promise.all([first.connect(), second.connect()]);
+      await first.close();
+      await first.close();
+      await expect(second.select('Users')).resolves.toEqual([{ id: 42 }]);
+      await expect(first.connect()).resolves.toBe(pool);
+      await second.close();
+
+      expect(pool.close).not.toHaveBeenCalled();
+      expect(pool.connect).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes an external pool when ownership is explicitly transferred', async () => {
+      const client = new SqlClient(externalPool(), { ownsPool: true });
+
+      await client.connect();
+      await client.close();
+
+      expect(pool.close).toHaveBeenCalledTimes(1);
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
+    it('runs transactions on the external pool', async () => {
+      request.query.mockResolvedValue({ recordsets: [[{ n: 1 }]], rowsAffected: [1] });
+      const client = new SqlClient(externalPool());
+
+      await expect(
+        client.transaction(async (tx) => tx.query('SELECT 1 AS n')),
+      ).resolves.toMatchObject({
+        rows: [{ n: 1 }],
+      });
+
+      expect(pool.transaction).toHaveBeenCalledTimes(1);
+      expect(transaction.request).toHaveBeenCalledTimes(1);
+      expect(transaction.commit).toHaveBeenCalledTimes(1);
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
     it('creates the pool only once', async () => {
       const client = new SqlClient(config);
 
