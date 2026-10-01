@@ -6,7 +6,7 @@ import { SqlClientError } from './SqlClientError';
  */
 export class SqlConnectionError extends SqlClientError {
   public constructor(message: string, options?: { cause?: unknown }) {
-    super(message, options);
+    super(message, { ...options, code: 'SQL_CONNECTION_ERROR', operation: 'connect' });
     this.name = 'SqlConnectionError';
   }
 }

@@ -9,6 +9,7 @@ Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common 
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
 - [Tagged template queries](#tagged-template-queries) · [Raw SQL and .sql files](#raw-sql-and-sql-files) · [Stored procedures](#stored-procedures) · [Transactions](#transactions)
 - [Typed parameters](#typed-parameters)
+- [Numeric precision](#numeric-precision)
 - [Cancellation and timeouts](#cancellation-and-timeouts) · [Retries](#retries)
 - [Error handling](#error-handling)
 - [Debug mode](#debug-mode)
@@ -96,7 +97,7 @@ In every helper, values are sent as parameters and table/column names are bracke
 | `select(table, where?, options?)` | `SELECT … WHERE … ORDER BY … OFFSET` | rows |
 | `findOne(table, where?, options?)` | `SELECT TOP (1)` | row or `null` |
 | `set(table, { key }).difference(list)` … | `EXISTS` / `NOT EXISTS` against a JSON list | rows, your items or `boolean` |
-| `insert(table, row)` | `INSERT` | generated id |
+| `insert(table, row)` | `INSERT` | generated id (safe `number`, otherwise exact `string`) |
 | `insertMany(table, rows, options?)` | `INSERT` per row, batched | `{ inserted, ids, failures }` |
 | `merge(table, rows, { on, ... })` | `UPDATE` if exists, else `INSERT` | `{ inserted, updated, skipped, actions, ids, failures }` |
 | `update(table, values, where)` | `UPDATE … WHERE` | rows affected |
@@ -204,6 +205,10 @@ const id = await client.insert('dbo.Users', { name: 'Ana', email: 'ana@example.c
 ```
 
 An empty object inserts `DEFAULT VALUES`. The id comes from `SCOPE_IDENTITY()`, so it works on tables with triggers.
+
+Identities within JavaScript's safe integer range return as numbers. Larger identities return as
+exact decimal strings, including in `insertMany().ids` and `merge().ids`. Their public type is
+`SqlIdentity = number | string`; `null` still means no identity (or a failed batch row).
 
 ## Insert many
 
@@ -573,6 +578,61 @@ await client.insert('dbo.Products', {
 | Date / time | `date`, `time(v, scale)`, `datetime`, `datetime2(v, scale)`, `datetimeoffset(v, scale)`, `smalldatetime` |
 | Other | `uniqueidentifier`, `xml` |
 
+## Numeric precision
+
+Use `t.bigint('9223372036854775807')` or `t.bigint(9223372036854775807n)` for large integers.
+`t.bigint` rejects unsafe JavaScript numbers, non-integers, and values outside SQL Server's signed
+64-bit range with `SqlPrecisionError`. Plain native `bigint` inputs are also bound explicitly as
+SQL `BIGINT`. A number that was rounded before reaching the library cannot be repaired.
+
+For exact decimals, use **strings** with `t.decimalExact(value, precision, scale)` or
+`t.numericExact(value, precision, scale)`:
+
+```ts
+const amount = '12345678901234567890.123456789012345678';
+
+await client.insert('dbo.Payments', {
+  amount: t.decimalExact(amount, 38, 18),
+});
+
+const { rows } = await client.query<{ amount: string }>(
+  'SELECT CONVERT(varchar(50), @amount) AS amount',
+  { amount: t.decimalExact(amount, 38, 18) },
+);
+// rows[0].amount === amount
+```
+
+These builders bind the text as NVARCHAR and insert a parameterized SQL conversion such as
+`CONVERT(decimal(38, 18), @amount)`. Conversion happens on SQL Server without passing the decimal
+through a JavaScript number. They accept `null`, require precision 1..38 and scale 0..precision,
+and reject exponent notation, invalid text, overflow, or fractional digits beyond the scale.
+They work in CRUD filters/values, named SQL parameters (including arrays), tagged templates,
+SQL files, and transaction helpers. The destination column or subsequent SQL arithmetic can
+still round values: match its precision/scale to the builder and review SQL expressions.
+
+`exec` RPC calls reject exact decimal builders for inputs and outputs because they require a
+SQL expression. Use `query` with a declared decimal variable and `EXEC`, or a procedure accepting
+decimal text and converting it inside SQL Server:
+
+```ts
+await client.query(
+  'DECLARE @value decimal(38,18) = @amount; EXEC dbo.SavePayment @amount = @value;',
+  { amount: t.decimalExact(amount, 38, 18) },
+);
+```
+
+The existing `t.decimal` / `t.numeric` builders retain driver behavior; **passing a string to them
+does not guarantee exact decimal transport**. Tedious' [numeric validation](https://github.com/tediousjs/tedious/blob/master/src/data-types/numeric.ts)
+converts input to a JavaScript number. Use the exact builders when preserving every digit matters.
+
+General query rows and procedure output values retain driver representations. The library does
+not infer or repair precision from TypeScript generics. To read exact BIGINT/DECIMAL values,
+convert them to sufficiently sized `varchar` in your SELECT or return string procedure outputs.
+Identity helpers already perform this conversion before decoding safe values to numbers.
+For dates, driver configuration such as `options.useUTC` governs interpretation; JS `Date` has
+millisecond resolution, so return SQL text if higher fractional precision or original offsets
+must be preserved.
+
 ## Cancellation and timeouts
 
 Every helper accepts `signal` and `timeout` in its options (`select`, `findOne`, `insert`, `insertMany`, `merge`, `update`, `delete`, `exec`, `query`, `queryFile`, and the same on `tx`):
@@ -683,11 +743,58 @@ Mid-query connection drops (`ESOCKET`, `ECONNRESET`) are not retried by default:
 
 ## Error handling
 
+Helper failures share the `SqlClientError` base class and a stable metadata contract:
+
+| Field | Meaning |
+| --- | --- |
+| `code` | Library code from the table below; use it for branching |
+| `driverCode` | Original underlying code such as `EREQUEST`, `ESOCKET`, or `ENOENT`, otherwise `null` |
+| `number` | SQL Server error number, extracted through nested driver errors/causes, otherwise `null` |
+| `operation` | Originating helper or lifecycle operation, otherwise `null` for errors created outside a call |
+| `cause` | Original thrown value when wrapping a failure; absent for errors without an underlying cause |
+
+| Class | `code` |
+| --- | --- |
+| `SqlClientError` | `SQL_CLIENT_ERROR` (validation or other library failure) |
+| `SqlQueryError` | `SQL_QUERY_ERROR` (driver/query failure) |
+| `SqlConnectionError` | `SQL_CONNECTION_ERROR` |
+| `SqlAbortError` | `SQL_ABORT_ERROR` or `SQL_TIMEOUT_ERROR` |
+| `BatchRowError` | `SQL_BATCH_ROW_ERROR` |
+| `SqlPrecisionError` | `SQL_PRECISION_ERROR` |
+
+```ts
+import { SqlClientError } from '@pilmee/mssql';
+
+try {
+  await client.insert('dbo.Users', { email });
+} catch (error) {
+  if (error instanceof SqlClientError && error.number === 2627) {
+    // Handle a duplicate key.
+  } else {
+    throw error;
+  }
+}
+```
+
+Library errors keep their class and metadata instead of being wrapped repeatedly. Query `failure`
+events report the same normalized error that the call throws. Validation/file/binding failures
+that occur before a query is sent are thrown by the helper but do not emit a query `failure` event.
+Retry checks retain the SQL error number; custom `shouldRetry` callbacks receive normalized query
+errors and can inspect `cause` for driver-specific details.
+
+Errors thrown by your `transaction` callback are rethrown unchanged after rollback. Driver failures
+from transaction begin/commit are normalized with operation `transaction`. Raw pool requests and
+`tx.request()` retain driver errors. Batch `onError: 'continue'` returns row failure records rather
+than throwing for individual rows; these records retain their separate `{ index, row, number, message }`
+contract. SQL-reported batch row failures may have no driver error object to preserve as `cause`.
+
 | Error | When |
 | --- | --- |
 | `SqlClientError` | Base class of every error below. Also thrown for invalid identifiers, empty `where`, missing parameters and unexpected batch errors (original error in `cause`). |
 | `BatchRowError` | `insertMany` / `merge` in `'rollback'` mode when a row fails. Has `index`, `row`, `number`, `sqlMessage`. Nothing was saved. |
 | `SqlConnectionError` | The pool couldn't connect (subclass of `SqlClientError`). Nothing ran; retried automatically. |
+| `SqlQueryError` | A helper's driver call failed; the original error is in `cause`, with SQL number and driver code preserved. |
+| `SqlPrecisionError` | Unsafe BIGINT input, invalid exact decimal dimensions/value, or an unsafe identity representation. |
 | `SqlAbortError` | The call's `signal` aborted or its `timeout` passed; the query was cancelled. Has `reason` (`'abort'` / `'timeout'`) and `operation`; `cause` is the signal's reason. |
 
 In `'continue'` mode batch helpers don't throw; each entry in `failures` has `index`, `row`, `number` and `message`. `number` is the SQL Server error number (e.g. `2627` unique key, `547` foreign key, `515` NOT NULL, `2628` truncation), or `null` when the error came from the driver or from validation.

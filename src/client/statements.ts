@@ -15,8 +15,7 @@ export const bindRow = (row: SqlRow, request: sql.Request, offset: number): Map<
   Object.keys(row).forEach((column, index) => {
     const name = `p${offset + index}`;
 
-    bindInput(request, name, row[column]);
-    params.set(column, `@${name}`);
+    params.set(column, bindInput(request, name, row[column]));
   });
 
   return params;
@@ -98,9 +97,7 @@ export const bindWhere = (
   const bind = (value: unknown): string => {
     const name = `p${next++}`;
 
-    bindInput(request, name, value);
-
-    return `@${name}`;
+    return bindInput(request, name, value);
   };
   const parts = Object.entries(where).map(([column, value]) => {
     const target = quoteIdentifier(column);

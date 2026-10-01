@@ -1,4 +1,5 @@
 import type sql from 'mssql';
+import type { SqlIdentity } from '../types/identity';
 import type { RowAction, RowFailure } from './batch';
 
 /**
@@ -22,7 +23,7 @@ export interface InsertManyResult {
    * Generated identities aligned with the input rows. `null` for failed rows or tables without an
    * identity column.
    */
-  ids: Array<number | null>;
+  ids: Array<SqlIdentity | null>;
   /** Rows that failed. Always empty in `'rollback'` mode (it throws instead). */
   failures: RowFailure[];
 }
@@ -40,7 +41,7 @@ export interface MergeResult {
   /** What happened to each input row, aligned with the input. `null` for failed rows. */
   actions: Array<RowAction | null>;
   /** Identity generated for inserted rows, aligned with the input. `null` otherwise. */
-  ids: Array<number | null>;
+  ids: Array<SqlIdentity | null>;
   /** Rows that failed. Always empty in `'rollback'` mode (it throws instead). */
   failures: RowFailure[];
 }

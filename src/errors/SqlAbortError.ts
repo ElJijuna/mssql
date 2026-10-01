@@ -19,7 +19,11 @@ export class SqlAbortError extends SqlClientError {
       reason === 'timeout'
         ? `${operation} timed out after ${String(options?.timeout)} ms`
         : `${operation} was aborted`,
-      { cause: options?.cause },
+      {
+        cause: options?.cause,
+        operation,
+        code: reason === 'timeout' ? 'SQL_TIMEOUT_ERROR' : 'SQL_ABORT_ERROR',
+      },
     );
     this.name = 'SqlAbortError';
   }

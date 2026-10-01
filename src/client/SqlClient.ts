@@ -7,11 +7,13 @@ import {
   type SqlDebugOption,
 } from '../debug/debug';
 import { SqlConnectionError } from '../errors/SqlConnectionError';
+import { normalizeError } from '../errors/SqlQueryError';
 import type { SqlClientEvents, SqlOperation } from '../events/events';
 import { TypedEmitter } from '../events/TypedEmitter';
 import { SqlFileLoader } from '../files/SqlFileLoader';
 import type { SqlParams } from '../sql/bindNamed';
 import type { SqlFragment } from '../sql/fragment';
+import type { SqlIdentity } from '../types/identity';
 import { type BatchOptions, describeError, poolConnection, rollbackQuietly } from './batch';
 import { type CallScope, createCallGuard, createScope, pause } from './cancellation';
 import {
@@ -171,7 +173,13 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     return async (request, text, run = async (req) => req.query<Record<string, unknown>>(text)) => {
       guard.check();
 
-      const execute = async () => guard.run(request, run(request));
+      const execute = async () => {
+        try {
+          return await guard.run(request, run(request));
+        } catch (error) {
+          throw normalizeError(error, operation);
+        }
+      };
       const observed =
         logger !== null ||
         this.hasListeners('query') ||
@@ -224,6 +232,30 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
    * `signal` and `timeout` span every attempt, including the waits between them.
    */
   private async call<TResult, TOptions extends QueryOptions>(
+    operation: SqlOperation,
+    options: TOptions,
+    run: (ctx: CommandContext, options: TOptions) => Promise<TResult>,
+    policyOptions: { retryByDefault?: boolean; connectionOnly?: boolean } = {},
+  ): Promise<TResult> {
+    try {
+      return await this.callWithRetry(
+        operation,
+        options,
+        async (ctx, queryOptions) => {
+          try {
+            return await run(ctx, queryOptions);
+          } catch (error) {
+            throw normalizeError(error, operation);
+          }
+        },
+        policyOptions,
+      );
+    } catch (error) {
+      throw normalizeError(error, operation);
+    }
+  }
+
+  private async callWithRetry<TResult, TOptions extends QueryOptions>(
     operation: SqlOperation,
     options: TOptions,
     run: (ctx: CommandContext, options: TOptions) => Promise<TResult>,
@@ -374,9 +406,13 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     const transaction = pool.transaction();
     const transactionId = ++this.transactionId;
 
-    await transaction.begin(
-      options.isolationLevel ? ISOLATION_LEVELS[options.isolationLevel] : undefined,
-    );
+    try {
+      await transaction.begin(
+        options.isolationLevel ? ISOLATION_LEVELS[options.isolationLevel] : undefined,
+      );
+    } catch (error) {
+      throw normalizeError(error, 'transaction');
+    }
 
     const start = performance.now();
     const tx = new SqlTransaction(transaction, transactionId, {
@@ -396,7 +432,13 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
       tx.finish();
       // Don't commit a transaction whose signal fired or whose time ran out meanwhile.
       createCallGuard('transaction', {}, scope).check();
-      await transaction.commit();
+
+      try {
+        await transaction.commit();
+      } catch (error) {
+        throw normalizeError(error, 'transaction');
+      }
+
       this.emit('transactionCommit', { transactionId, durationMs: performance.now() - start });
 
       return result;
@@ -488,7 +530,7 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     table: string,
     row: SqlRow,
     options: QueryOptions = {},
-  ): Promise<number | null> {
+  ): Promise<SqlIdentity | null> {
     return this.call('insert', options, async (ctx, o) => insertCommand(ctx, table, row, o));
   }
 
@@ -678,11 +720,20 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     input: QueryInput,
     ...rest: unknown[]
   ): Promise<QueryResult<TRow>> {
-    const { text, params, options } = normalizeQuery(input, rest);
+    try {
+      const { text, params, options } = normalizeQuery(input, rest);
 
-    return this.call('query', options, async (ctx, o) => queryCommand<TRow>(ctx, text, params, o), {
-      retryByDefault: false,
-    });
+      return await this.call(
+        'query',
+        options,
+        async (ctx, o) => queryCommand<TRow>(ctx, text, params, o),
+        {
+          retryByDefault: false,
+        },
+      );
+    } catch (error) {
+      throw normalizeError(error, 'query');
+    }
   }
 
   /**
@@ -759,7 +810,11 @@ export class SqlClient extends TypedEmitter<SqlClientEvents> {
     this.poolPromise = undefined;
 
     if (this.ownsPool) {
-      await pool.close();
+      try {
+        await pool.close();
+      } catch (error) {
+        throw normalizeError(error, 'close');
+      }
     }
 
     this.emit('close', {});

@@ -1,4 +1,5 @@
 import sql from 'mssql';
+import { SqlPrecisionError } from '../errors/SqlPrecisionError';
 import { bindInput, SqlParam, t } from './SqlParam';
 
 describe('t builders', () => {
@@ -41,6 +42,36 @@ describe('t builders', () => {
     expect(t.bigint(9007199254740993n).value).toBe('9007199254740993');
   });
 
+  it.each([
+    Number.MAX_SAFE_INTEGER + 1,
+    1.5,
+    Infinity,
+    NaN,
+    '9223372036854775808',
+    '-9223372036854775809',
+    '1.5',
+  ])('rejects unsafe or invalid BIGINT %s', (value) => {
+    expect(() => t.bigint(value)).toThrow(SqlPrecisionError);
+  });
+
+  it('accepts exact BIGINT boundaries', () => {
+    expect(t.bigint(9223372036854775807n).value).toBe('9223372036854775807');
+    expect(t.bigint('-9223372036854775808').value).toBe('-9223372036854775808');
+  });
+
+  it('validates exact decimal dimensions and rejects implicit rounding', () => {
+    expect(t.decimalExact('12345678901234567890.123456789012345678', 38, 18).value).toBe(
+      '12345678901234567890.123456789012345678',
+    );
+    expect(t.decimalExact('0.12', 2, 2).value).toBe('0.12');
+    expect(t.numericExact(null, 38, 18).value).toBeNull();
+    expect(() => t.decimalExact('1.234', 5, 2)).toThrow(SqlPrecisionError);
+    expect(() => t.decimalExact('1000', 3, 0)).toThrow(SqlPrecisionError);
+    expect(() => t.decimalExact('1e3', 5, 0)).toThrow(SqlPrecisionError);
+    expect(() => t.decimalExact('1', 39, 0)).toThrow(SqlPrecisionError);
+    expect(() => t.decimalExact('1', 5, 6)).toThrow(SqlPrecisionError);
+  });
+
   it('keeps null values', () => {
     expect(t.nvarchar(null, 50).value).toBeNull();
   });
@@ -63,5 +94,22 @@ describe('bindInput', () => {
     bindInput(request as unknown as sql.Request, 'p0', 'Ana');
 
     expect(request.input).toHaveBeenCalledWith('p0', 'Ana');
+  });
+
+  it('binds native bigint with an explicit BIGINT type', () => {
+    bindInput(request as unknown as sql.Request, 'p0', 9007199254740993n);
+
+    expect(request.input).toHaveBeenCalledWith('p0', sql.BigInt(), '9007199254740993');
+  });
+
+  it('binds exact decimal text and converts it on the server', () => {
+    const expression = bindInput(
+      request as unknown as sql.Request,
+      'p0',
+      t.decimalExact('9007199254740993.01', 20, 2),
+    );
+
+    expect(request.input).toHaveBeenCalledWith('p0', sql.NVarChar(sql.MAX), '9007199254740993.01');
+    expect(expression).toBe('CONVERT(decimal(20, 2), @p0)');
   });
 });

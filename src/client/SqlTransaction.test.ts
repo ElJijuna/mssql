@@ -107,7 +107,11 @@ describe('SqlClient.transaction', () => {
 
     transaction.commit.mockRejectedValue(failure);
 
-    await expect(client.transaction(async () => Promise.resolve('ok'))).rejects.toBe(failure);
+    await expect(client.transaction(async () => Promise.resolve('ok'))).rejects.toMatchObject({
+      code: 'SQL_QUERY_ERROR',
+      operation: 'transaction',
+      cause: failure,
+    });
     expect(transaction.rollback).toHaveBeenCalled();
   });
 

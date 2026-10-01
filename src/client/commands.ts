@@ -4,6 +4,7 @@ import { BatchRowError } from '../errors/BatchRowError';
 import { SqlClientError } from '../errors/SqlClientError';
 import type { SqlOperation, SqlRowFailureEvent } from '../events/events';
 import type { SqlFile } from '../files/SqlFileLoader';
+import { parseIdentity, type SqlIdentity } from '../types/identity';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
 import {
   type BatchConnection,
@@ -89,14 +90,17 @@ export const insertCommand = async (
   table: string,
   row: SqlRow,
   options: QueryOptions,
-): Promise<number | null> => {
+): Promise<SqlIdentity | null> => {
   const query = ctx.runner('insert', options);
   const request = await ctx.request();
   const insert = buildInsertStatement(quoteIdentifier(table), row, request);
-  const result = await query(request, `${insert} SELECT SCOPE_IDENTITY() AS id;`);
+  const result = await query(
+    request,
+    `${insert} SELECT CONVERT(varchar(40), SCOPE_IDENTITY()) AS id;`,
+  );
   const id = result.recordset[0]?.id;
 
-  return typeof id === 'number' ? id : null;
+  return parseIdentity(id);
 };
 
 /**

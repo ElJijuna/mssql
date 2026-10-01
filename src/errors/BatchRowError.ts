@@ -15,10 +15,10 @@ export class BatchRowError extends SqlClientError {
   public constructor(
     public readonly index: number,
     public readonly row: SqlRow,
-    public readonly number: number | null,
+    number: number | null,
     public readonly sqlMessage: string,
   ) {
-    super(`Row ${index} failed: ${sqlMessage}`);
+    super(`Row ${index} failed: ${sqlMessage}`, { code: 'SQL_BATCH_ROW_ERROR', number });
     this.name = 'BatchRowError';
   }
 }

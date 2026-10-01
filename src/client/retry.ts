@@ -1,5 +1,5 @@
 import { SqlAbortError } from '../errors/SqlAbortError';
-import { SqlClientError } from '../errors/SqlClientError';
+import { errorMetadata, SqlClientError } from '../errors/SqlClientError';
 import { SqlConnectionError } from '../errors/SqlConnectionError';
 
 /**
@@ -119,28 +119,7 @@ export const resolveRetry = (
  * @internal
  */
 export const errorNumber = (error: unknown): number | null => {
-  let current: unknown = error;
-
-  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth++) {
-    const candidate = current as {
-      number?: unknown;
-      info?: { number?: unknown };
-      originalError?: unknown;
-      cause?: unknown;
-    };
-
-    if (typeof candidate.number === 'number') {
-      return candidate.number;
-    }
-
-    if (typeof candidate.info?.number === 'number') {
-      return candidate.info.number;
-    }
-
-    current = candidate.originalError ?? candidate.cause;
-  }
-
-  return null;
+  return errorMetadata(error).number;
 };
 
 /**

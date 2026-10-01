@@ -25,8 +25,11 @@ export type {
 } from './debug/debug';
 export { BatchRowError } from './errors/BatchRowError';
 export { SqlAbortError } from './errors/SqlAbortError';
+export type { SqlErrorCode, SqlErrorOptions } from './errors/SqlClientError';
 export { SqlClientError } from './errors/SqlClientError';
 export { SqlConnectionError } from './errors/SqlConnectionError';
+export { SqlPrecisionError } from './errors/SqlPrecisionError';
+export { SqlQueryError } from './errors/SqlQueryError';
 export type {
   SqlClientEvents,
   SqlConnectEvent,
@@ -45,6 +48,7 @@ export type { Listener, SubscribeOptions } from './events/TypedEmitter';
 export { TypedEmitter } from './events/TypedEmitter';
 export type { SqlParams } from './sql/bindNamed';
 export { SqlFragment, SqlIdentifier, SqlRaw, tsql } from './sql/fragment';
+export type { SqlIdentity } from './types/identity';
 export type { Nullable, SqlLength } from './types/SqlParam';
-export { SqlParam, t } from './types/SqlParam';
+export { SqlExactDecimal, SqlParam, t } from './types/SqlParam';
 export { quoteIdentifier } from './utils/quoteIdentifier';

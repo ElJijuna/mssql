@@ -1,10 +1,12 @@
 import type sql from 'mssql';
 import type { QueryOptions, QueryRunner } from '../debug/debug';
 import { SqlClientError } from '../errors/SqlClientError';
+import { normalizeError } from '../errors/SqlQueryError';
 import type { SqlOperation, SqlRowFailureEvent } from '../events/events';
 import type { SqlFile } from '../files/SqlFileLoader';
 import type { SqlParams } from '../sql/bindNamed';
 import type { SqlFragment } from '../sql/fragment';
+import type { SqlIdentity } from '../types/identity';
 import type { BatchConnection, BatchOptions } from './batch';
 import {
   type CommandContext,
@@ -131,7 +133,9 @@ export class SqlTransaction {
     where: SqlWhere = {},
     options: SelectOptions = {},
   ): Promise<TRow[]> {
-    return this.enqueue(async () => selectCommand<TRow>(this.context, table, where, options));
+    return this.enqueue('select', async () =>
+      selectCommand<TRow>(this.context, table, where, options),
+    );
   }
 
   /** Transaction version of {@link SqlClient.findOne}. */
@@ -140,7 +144,9 @@ export class SqlTransaction {
     where: SqlWhere = {},
     options: FindOneOptions = {},
   ): Promise<TRow | null> {
-    return this.enqueue(async () => findOneCommand<TRow>(this.context, table, where, options));
+    return this.enqueue('findOne', async () =>
+      findOneCommand<TRow>(this.context, table, where, options),
+    );
   }
 
   /** Transaction version of {@link SqlClient.insert}. */
@@ -148,8 +154,8 @@ export class SqlTransaction {
     table: string,
     row: SqlRow,
     options: QueryOptions = {},
-  ): Promise<number | null> {
-    return this.enqueue(async () => insertCommand(this.context, table, row, options));
+  ): Promise<SqlIdentity | null> {
+    return this.enqueue('insert', async () => insertCommand(this.context, table, row, options));
   }
 
   /** Transaction version of {@link SqlClient.insertMany}. */
@@ -158,12 +164,14 @@ export class SqlTransaction {
     rows: SqlRow[],
     options: BatchOptions = {},
   ): Promise<InsertManyResult> {
-    return this.enqueue(async () => insertManyCommand(this.context, table, rows, options));
+    return this.enqueue('insertMany', async () =>
+      insertManyCommand(this.context, table, rows, options),
+    );
   }
 
   /** Transaction version of {@link SqlClient.merge}. */
   public async merge(table: string, rows: SqlRow[], options: MergeOptions): Promise<MergeResult> {
-    return this.enqueue(async () => mergeCommand(this.context, table, rows, options));
+    return this.enqueue('merge', async () => mergeCommand(this.context, table, rows, options));
   }
 
   /** Transaction version of {@link SqlClient.update}. */
@@ -173,12 +181,14 @@ export class SqlTransaction {
     where: SqlWhere,
     options: QueryOptions = {},
   ): Promise<number> {
-    return this.enqueue(async () => updateCommand(this.context, table, values, where, options));
+    return this.enqueue('update', async () =>
+      updateCommand(this.context, table, values, where, options),
+    );
   }
 
   /** Transaction version of {@link SqlClient.delete}. */
   public async delete(table: string, where: SqlWhere, options: QueryOptions = {}): Promise<number> {
-    return this.enqueue(async () => deleteCommand(this.context, table, where, options));
+    return this.enqueue('delete', async () => deleteCommand(this.context, table, where, options));
   }
 
   /** Transaction version of {@link SqlClient.exec}. */
@@ -187,7 +197,7 @@ export class SqlTransaction {
     params: SqlRow = {},
     options: ExecOptions<TOutput> = {},
   ): Promise<ExecResult<TRow, ExecOutputValues<TOutput>>> {
-    return this.enqueue(async () =>
+    return this.enqueue('exec', async () =>
       execCommand<TRow, TOutput>(this.context, procedure, params, options),
     );
   }
@@ -210,9 +220,11 @@ export class SqlTransaction {
     input: QueryInput,
     ...rest: unknown[]
   ): Promise<QueryResult<TRow>> {
-    const { text, params, options } = normalizeQuery(input, rest);
+    return this.enqueue('query', async () => {
+      const { text, params, options } = normalizeQuery(input, rest);
 
-    return this.enqueue(async () => queryCommand<TRow>(this.context, text, params, options));
+      return queryCommand<TRow>(this.context, text, params, options);
+    });
   }
 
   /** Transaction version of {@link SqlClient.queryFile}. */
@@ -221,13 +233,15 @@ export class SqlTransaction {
     params: SqlParams = {},
     options: RawQueryOptions = {},
   ): Promise<QueryResult<TRow>> {
-    return this.enqueue(async () => queryFileCommand<TRow>(this.context, file, params, options));
+    return this.enqueue('queryFile', async () =>
+      queryFileCommand<TRow>(this.context, file, params, options),
+    );
   }
 
   /** Transaction version of {@link SqlClient.set}. */
   public set<TRow extends object = SqlRow>(table: string, options: SqlSetOptions): SqlSet<TRow> {
     return new SqlSet<TRow>(table, options, async (work, queryOptions) =>
-      this.enqueue(async () => work(this.context, queryOptions)),
+      this.enqueue('set', async () => work(this.context, queryOptions)),
     );
   }
 
@@ -257,14 +271,25 @@ export class SqlTransaction {
     }
   }
 
-  private async enqueue<TResult>(operation: () => Promise<TResult>): Promise<TResult> {
-    this.assertActive();
+  private async enqueue<TResult>(
+    name: SqlOperation,
+    operation: () => Promise<TResult>,
+  ): Promise<TResult> {
+    try {
+      this.assertActive();
+    } catch (error) {
+      throw normalizeError(error, name);
+    }
 
     const previous = this.queue;
     const run = (async () => {
       await previous;
 
-      return operation();
+      try {
+        return await operation();
+      } catch (error) {
+        throw normalizeError(error, name);
+      }
     })();
 
     // The queue never rejects, so one failed operation doesn't block the next; the caller still

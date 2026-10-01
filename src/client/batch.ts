@@ -2,7 +2,8 @@ import type sql from 'mssql';
 import type { QueryOptions, QueryRunner } from '../debug/debug';
 import { BatchRowError } from '../errors/BatchRowError';
 import { SqlAbortError } from '../errors/SqlAbortError';
-import { SqlClientError } from '../errors/SqlClientError';
+import { errorMetadata, SqlClientError } from '../errors/SqlClientError';
+import { parseIdentity, type SqlIdentity } from '../types/identity';
 import type { SqlRow } from './types';
 
 /**
@@ -62,7 +63,7 @@ export type RowAction = 'inserted' | 'updated' | 'skipped';
 export interface RowOutcome {
   i: number;
   action: RowAction;
-  id: number | null;
+  id: SqlIdentity | null;
 }
 
 /**
@@ -168,7 +169,7 @@ export const buildBatch = (
     'DECLARE @_i int;',
     'DECLARE @_out TABLE (i int NOT NULL, action varchar(10) NOT NULL, id numeric(38, 0) NULL);',
   ];
-  const footer = 'SELECT i, action, id FROM @_out ORDER BY i;';
+  const footer = 'SELECT i, action, CONVERT(varchar(40), id) AS id FROM @_out ORDER BY i;';
 
   if (onError === 'continue') {
     return [
@@ -199,10 +200,8 @@ export const buildBatch = (
  * @internal
  */
 export const describeError = (error: unknown): { number: number | null; message: string } => {
-  const number = (error as { number?: unknown } | null)?.number;
-
   return {
-    number: typeof number === 'number' ? number : null,
+    number: errorMetadata(error).number,
     message: error instanceof Error ? error.message : String(error),
   };
 };
@@ -226,7 +225,7 @@ const runChunk = async (
   ];
 
   return {
-    outcomes,
+    outcomes: outcomes.map((outcome) => ({ ...outcome, id: parseIdentity(outcome.id) })),
     failures: failures.map(({ i, number, message }) => ({
       index: i,
       row: rows[i] ?? {},

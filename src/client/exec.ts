@@ -1,7 +1,7 @@
 import type sql from 'mssql';
 import type { QueryOptions } from '../debug/debug';
 import { SqlClientError } from '../errors/SqlClientError';
-import { bindInput, type SqlParam } from '../types/SqlParam';
+import { bindInput, SqlExactDecimal, type SqlParam } from '../types/SqlParam';
 import { quoteIdentifier } from '../utils/quoteIdentifier';
 import type { CommandContext } from './commands';
 import type { SqlRow } from './types';
@@ -84,6 +84,16 @@ export const execCommand = async <TRow extends object, TOutput extends ExecOutpu
 ): Promise<ExecResult<TRow, ExecOutputValues<TOutput>>> => {
   if (procedure.trim() === '') {
     throw new SqlClientError('exec requires a procedure name');
+  }
+
+  if (
+    [...Object.values(params), ...Object.values(options.output ?? {})].some(
+      (value) => value instanceof SqlExactDecimal,
+    )
+  ) {
+    throw new SqlClientError(
+      'Exact decimal builders require SQL text; use query with EXEC and explicit conversion, or string procedure parameters',
+    );
   }
 
   const query = ctx.runner('exec', options);

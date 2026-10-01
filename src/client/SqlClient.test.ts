@@ -192,6 +192,31 @@ describe('SqlClient', () => {
   });
 
   describe('insert', () => {
+    it('returns large identities as exact strings and safe identities as numbers', async () => {
+      request.query
+        .mockResolvedValueOnce({ recordset: [{ id: '9007199254740993' }] })
+        .mockResolvedValueOnce({ recordset: [{ id: '42' }] });
+      const client = new SqlClient(config);
+
+      await expect(client.insert('Users', { name: 'Ana' })).resolves.toBe('9007199254740993');
+      await expect(client.insert('Users', { name: 'Luis' })).resolves.toBe(42);
+    });
+
+    it('preserves exact decimals in CRUD SQL and parameter values', async () => {
+      await new SqlClient(config).insert('Prices', {
+        price: t.decimalExact('9007199254740993.01', 20, 2),
+      });
+
+      expect(request.input).toHaveBeenCalledWith(
+        'p0',
+        sql.NVarChar(sql.MAX),
+        '9007199254740993.01',
+      );
+      expect(request.query).toHaveBeenCalledWith(
+        expect.stringContaining('VALUES (CONVERT(decimal(20, 2), @p0))'),
+      );
+    });
+
     it('inserts a parameterized row and returns the identity', async () => {
       await expect(
         new SqlClient(config).insert('dbo.Users', { name: 'Ana', 'e-mail': 'ana@example.com' }),
@@ -200,7 +225,7 @@ describe('SqlClient', () => {
       expect(request.input).toHaveBeenNthCalledWith(1, 'p0', 'Ana');
       expect(request.input).toHaveBeenNthCalledWith(2, 'p1', 'ana@example.com');
       expect(request.query).toHaveBeenCalledWith(
-        'INSERT INTO [dbo].[Users] ([name], [e-mail]) VALUES (@p0, @p1); SELECT SCOPE_IDENTITY() AS id;',
+        'INSERT INTO [dbo].[Users] ([name], [e-mail]) VALUES (@p0, @p1); SELECT CONVERT(varchar(40), SCOPE_IDENTITY()) AS id;',
       );
     });
 
@@ -217,7 +242,7 @@ describe('SqlClient', () => {
       await new SqlClient(config).insert('Logs', {});
 
       expect(request.query).toHaveBeenCalledWith(
-        'INSERT INTO [Logs] DEFAULT VALUES; SELECT SCOPE_IDENTITY() AS id;',
+        'INSERT INTO [Logs] DEFAULT VALUES; SELECT CONVERT(varchar(40), SCOPE_IDENTITY()) AS id;',
       );
     });
 
@@ -229,6 +254,21 @@ describe('SqlClient', () => {
   });
 
   describe('insertMany', () => {
+    it('preserves large identities from batch results', async () => {
+      request.query.mockResolvedValue(
+        batchResult([], [{ i: 0, action: 'inserted', id: '9007199254740993' }]),
+      );
+
+      await expect(
+        new SqlClient(config).insertMany('Users', [{ name: 'Ana' }]),
+      ).resolves.toMatchObject({
+        ids: ['9007199254740993'],
+      });
+      expect(request.query).toHaveBeenCalledWith(
+        expect.stringContaining('CONVERT(varchar(40), id) AS id'),
+      );
+    });
+
     const rows = [{ name: 'Ana' }, { name: 'Luis' }, { name: 'Eva' }];
     const inserted = (i: number, id: number) => ({ i, action: 'inserted', id });
 
@@ -608,9 +648,18 @@ describe('SqlClient', () => {
       request.query.mockRejectedValue(error);
       client.on('failure', failure);
 
-      await expect(client.delete('Users', { id: 1 })).rejects.toBe(error);
+      await expect(client.delete('Users', { id: 1 })).rejects.toMatchObject({
+        code: 'SQL_QUERY_ERROR',
+        operation: 'delete',
+        number: 547,
+        cause: error,
+      });
       expect(failure).toHaveBeenCalledWith(
-        expect.objectContaining({ operation: 'delete', error, number: 547 }),
+        expect.objectContaining({
+          operation: 'delete',
+          error: expect.objectContaining({ cause: error }) as SqlClientError,
+          number: 547,
+        }),
       );
     });
 
@@ -845,7 +894,12 @@ describe('SqlClient', () => {
 
       const client = new SqlClient(config).on('failure', failure);
 
-      await expect(client.exec('dbo.Nope')).rejects.toBe(error);
+      await expect(client.exec('dbo.Nope')).rejects.toMatchObject({
+        code: 'SQL_QUERY_ERROR',
+        operation: 'exec',
+        number: 2812,
+        cause: error,
+      });
       expect(failure).toHaveBeenCalledWith(
         expect.objectContaining({ operation: 'exec', number: 2812 }),
       );
@@ -1246,6 +1300,59 @@ describe('SqlClient', () => {
   });
 
   describe('query with tagged templates', () => {
+    it('normalizes failures without event listeners and preserves the driver code', async () => {
+      const cause = Object.assign(new Error('duplicate'), {
+        code: 'EREQUEST',
+        originalError: { info: { number: 2627 } },
+      });
+
+      request.query.mockRejectedValue(cause);
+
+      await expect(new SqlClient(config).query('SELECT 1')).rejects.toMatchObject({
+        code: 'SQL_QUERY_ERROR',
+        driverCode: 'EREQUEST',
+        number: 2627,
+        operation: 'query',
+        cause,
+      });
+    });
+
+    it('attaches an operation to preflight validation errors', async () => {
+      await expect(new SqlClient(config).query('SELECT @missing')).rejects.toMatchObject({
+        code: 'SQL_CLIENT_ERROR',
+        operation: 'query',
+        number: null,
+      });
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
+    it('uses exact decimal conversion in named scalars, arrays, and tagged queries', async () => {
+      request.query.mockResolvedValue({ recordsets: [[]], rowsAffected: [] });
+      const client = new SqlClient(config);
+      const value = t.decimalExact('9007199254740993.01', 20, 2);
+
+      await client.query('SELECT @amount WHERE @amount IN (@amounts)', {
+        amount: value,
+        amounts: [value],
+      });
+      expect(request.query).toHaveBeenLastCalledWith(
+        'SELECT CONVERT(decimal(20, 2), @amount) WHERE CONVERT(decimal(20, 2), @amount) IN (CONVERT(decimal(20, 2), @amounts__0))',
+      );
+
+      await client.query`SELECT ${value}`;
+      expect(request.query).toHaveBeenLastCalledWith('SELECT CONVERT(decimal(20, 2), @p0)');
+    });
+
+    it('rejects exact decimal RPC parameters before connecting', async () => {
+      await expect(
+        new SqlClient(config).exec('dbo.Price', { price: t.decimalExact('1.00', 5, 2) }),
+      ).rejects.toMatchObject({
+        code: 'SQL_CLIENT_ERROR',
+        operation: 'exec',
+      });
+      expect(ConnectionPoolMock).not.toHaveBeenCalled();
+    });
+
     const useRealRequest = (): { realRequest: sql.Request; query: jest.SpyInstance } => {
       const realRequest = new sql.Request();
       const query = jest

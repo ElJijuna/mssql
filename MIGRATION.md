@@ -216,7 +216,18 @@ Copy SQL files into the release artifact while preserving their relative paths. 
 
 Start with `retry: false` to isolate the API migration. Then opt into retries deliberately: CRUD helpers normally retry transient failures; raw query helpers, procedures, and transaction callbacks require per-call opt-in. Transaction retries rerun the entire callback. Keep HTTP calls, emails, and other external side effects outside retryable callbacks.
 
-Review each catch block. Validation throws `SqlClientError`, connection failures use `SqlConnectionError`, cancellation uses `SqlAbortError`, and rollback-mode batch row failures use `BatchRowError`. Ordinary server query errors can still be driver errors; do not assume every thrown error is wrapped. In `onError: 'continue'` batches, inspect `failures` explicitly.
+Review each catch block. Helper driver failures now throw `SqlQueryError` (a `SqlClientError`) with stable library `code`, underlying `driverCode`, SQL Server `number`, originating `operation`, and original `cause`. Validation uses `SqlClientError`, precision validation uses `SqlPrecisionError`, connection failures use `SqlConnectionError`, cancellation uses `SqlAbortError`, and rollback-mode batch row failures use `BatchRowError`. Raw driver requests and application errors thrown by transaction callbacks retain their original errors. In `onError: 'continue'` batches, inspect `failures` explicitly.
+
+### Error and precision compatibility changes
+
+- Replace `error instanceof sql.RequestError` checks on helper calls with `error instanceof SqlClientError` plus `number`/`driverCode`; the original driver object is available in `cause`. Comparing a helper's thrown error to the original driver error by object identity no longer works.
+- `insert` now returns `SqlIdentity | null` (`number | string | null`), and batch `ids` use the same identity type. Safe identities remain numbers; larger identities become exact strings. Update application interfaces that previously assumed every generated id was a number. Do not call `Number(id)` on a large string.
+- `t.bigint` rejects unsafe numeric values and out-of-range integers. Supply a decimal string or native `bigint` for large values.
+- Use `t.decimalExact`/`t.numericExact` with strings for exact input. The existing decimal builders retain driver numeric behavior; string input alone is not an exactness guarantee.
+- Exact builders require SQL expressions and cannot be used in `exec` RPC parameters. Use a SQL text call with a declared decimal variable or procedure string parameters instead.
+- General SELECT and procedure outputs retain driver representations. Explicitly SELECT decimal/BIGINT columns as sufficiently sized `varchar` when exact output is needed. See [numeric precision](README.md#numeric-precision).
+
+These changes need a compatibility release: the identity return types widen and helper driver errors are wrapped. Validate consumer typechecks and error handling before upgrading.
 
 Preserve configuration-level driver timeouts. Helper `{ timeout, signal }` additionally bounds/cancels operations; transaction options apply to the whole callback's database work. Opening a connection is bounded by the driver's `connectionTimeout`.
 

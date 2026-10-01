@@ -54,16 +54,19 @@ export const bindNamedParameters = (
     const param = bare(name);
 
     if (!Array.isArray(value)) {
-      bindInput(request, param, value);
+      const expression = bindInput(request, param, value);
+
+      if (expression !== `@${param}`) {
+        expansions.set(key, expression);
+      }
+
       continue;
     }
 
     const list = value.map((item: unknown, index) => {
       const itemName = `${param}__${index}`;
 
-      bindInput(request, itemName, item);
-
-      return `@${itemName}`;
+      return bindInput(request, itemName, item);
     });
 
     expansions.set(key, list.length === 0 ? 'NULL' : list.join(', '));
