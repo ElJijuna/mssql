@@ -3,6 +3,7 @@
 Helpers on top of [`mssql`](https://www.npmjs.com/package/mssql) to make common Microsoft SQL Server tasks easier.
 
 - [Install](#install)
+- [Migration from mssql](MIGRATION.md)
 - [Connect](#connect)
 - [Select / findOne](#select--findone) · [Where filters](#where-filters) · [Set operations](#set-operations)
 - [Insert](#insert) · [Insert many](#insert-many) · [Merge (upsert)](#merge-upsert) · [Update](#update) · [Delete](#delete)
@@ -414,6 +415,8 @@ Tips for queries like this:
 | `cacheSqlFiles` | `true` | Read each file once. Set `false` in development to pick up edits without restarting. |
 
 - The `.sql` extension is optional: `'users/get-by-tenant'` and `'users/get-by-tenant.sql'` are the same file.
+- `sqlDir` is a base directory, and `queryFile` reads one exact path within it. Glob patterns such as `src/**/*.sql` are not expanded. For nested files, use `sqlDir: 'src'` and `queryFile('features/users/list.sql')`.
+- An explicit extension such as `.tsql` is accepted. There is no configurable default extension: paths without an extension always receive `.sql`. See the [migration guide](MIGRATION.md) for the full file-loading compatibility table.
 - One file = one batch. Files with `GO` separators are rejected (`GO` is an SSMS/sqlcmd feature, not T-SQL).
 - Your build must ship the `.sql` files: bundlers don't copy them. Copy the folder in your build step (or Dockerfile), or with Vite/esbuild import the text (`import text from './get-users.sql?raw'`) and use `client.query(text, params)`.
 - Debug output and events report operation `queryFile` and start the SQL with a `-- users/get-by-tenant.sql` comment.
