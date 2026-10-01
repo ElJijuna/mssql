@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/ElJijuna/mssql/compare/v1.0.1...v1.1.0) (2026-09-28)
+
+
+### Features
+
+* add set operations between a table and a list ([07f79a3](https://github.com/ElJijuna/mssql/commit/07f79a3d92db05870b512d96d375987cac1ae837))
+
 ## [1.0.1](https://github.com/ElJijuna/mssql/compare/v1.0.0...v1.0.1) (2026-09-28)
 
 
